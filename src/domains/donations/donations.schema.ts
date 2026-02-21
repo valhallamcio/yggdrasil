@@ -1,0 +1,21 @@
+import { z } from 'zod';
+
+/** Validates the form-urlencoded body from Ko-fi (contains a 'data' JSON string) */
+export const kofiBodySchema = z.object({
+  data: z.string().min(1),
+});
+
+/** Validates the parsed JSON object from the Ko-fi body.data field */
+export const kofiPayloadSchema = z.object({
+  verification_token: z.string(),
+  type: z.string(),
+  from_name: z.string(),
+  amount: z.string(),
+  currency: z.string(),
+  message: z.string().nullable().optional(),
+  is_subscription_payment: z.boolean().optional(),
+  kofi_transaction_id: z.string(),
+});
+
+export type KofiBody = z.infer<typeof kofiBodySchema>;
+export type KofiPayloadValidated = z.infer<typeof kofiPayloadSchema>;
