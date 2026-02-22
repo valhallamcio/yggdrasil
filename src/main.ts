@@ -19,6 +19,9 @@ async function bootstrap(): Promise<void> {
   // 1. Connect to MongoDB (fast-fail if unreachable)
   await connectDatabase();
 
+  // 1b. Register scheduler jobs (dynamic import — must run after DB is connected)
+  await import('./core/scheduler/jobs/showcase-refresh.job.js');
+
   // 2. Build the Express app (pure, no I/O)
   const app = createApp();
 

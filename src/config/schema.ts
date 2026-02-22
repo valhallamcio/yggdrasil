@@ -41,6 +41,8 @@ export const configSchema = z.object({
   PATREON_WEBHOOK_SECRET: z.string().optional(),
   DISCORD_DONATIONS_CHANNEL_ID: z.string().optional(),
   DISCORD_DONATIONS_LOG_CHANNEL_ID: z.string().optional(),
+
+  DISCORD_SCREENSHOT_CHANNEL_ID: z.string().optional(),
 });
 
 export type Config = z.output<typeof configSchema>;

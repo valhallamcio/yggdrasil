@@ -49,6 +49,9 @@ export function createApp(): Express {
     })
   );
 
+  // ── Static files ──────────────────────────────────────────────────────────
+  app.use(express.static('public'));
+
   // ── Routes ────────────────────────────────────────────────────────────────
   app.use('/', createRootRouter());
 
