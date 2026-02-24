@@ -21,6 +21,15 @@ async function bootstrap(): Promise<void> {
 
   // 1b. Register scheduler jobs (dynamic import — must run after DB is connected)
   await import('./core/scheduler/jobs/showcase-refresh.job.js');
+  await import('./core/scheduler/jobs/server-sync.job.js');
+
+  // 1c. Initialize Pterodactyl WebSocket connections for live server stats
+  const { pterodactylWsManager } = await import('./domains/servers/pterodactyl-ws.manager.js');
+  await pterodactylWsManager.connect();
+
+  // 1d. Start recording server stats to time series collection
+  const { statsRecorder } = await import('./domains/servers/stats-recorder.js');
+  await statsRecorder.start();
 
   // 2. Build the Express app (pure, no I/O)
   const app = createApp();

@@ -46,6 +46,32 @@ export class DiscordPlugin implements Plugin {
     eventBus.on('donation.received', ({ channelId, message }) => {
       void this.sendWebhook(channelId, { content: message });
     });
+
+    // Subscribe to server crash/recovery events
+    eventBus.on('server.crashed', ({ server, serverName, previousState, currentState, reason }) => {
+      const channelId = config.DISCORD_SERVER_STATUS_CHANNEL_ID;
+      if (!channelId) return;
+
+      const labels: Record<string, string> = {
+        'crash':               'crashed',
+        'startup-crash':       'crashed during startup',
+        'startup-lost':        'lost during startup',
+        'unexpected-restart':  'restarted unexpectedly',
+        'restart-during-stop': 'restarted during shutdown',
+        'stop-lost':           'lost during shutdown',
+      };
+
+      void this.sendMessage(
+        channelId,
+        `**${serverName}** (\`${server}\`) ${labels[reason] ?? 'encountered an issue'} (${previousState} → ${currentState})`,
+      );
+    });
+
+    eventBus.on('server.recovered', ({ server, serverName }) => {
+      const channelId = config.DISCORD_SERVER_STATUS_CHANNEL_ID;
+      if (!channelId) return;
+      void this.sendMessage(channelId, `**${serverName}** (\`${server}\`) is back online.`);
+    });
   }
 
   async sendMessage(channelId: string, content: string): Promise<void> {

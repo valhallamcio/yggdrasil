@@ -19,3 +19,16 @@ export function apiKeyAuth(): RequestHandler {
     next();
   };
 }
+
+/**
+ * Optional API key authentication middleware.
+ * Sets req.authenticated = true when a valid key is present, false otherwise.
+ * Never rejects the request.
+ */
+export function optionalApiKeyAuth(): RequestHandler {
+  return (req: Request, _res: Response, next: NextFunction): void => {
+    const key = req.headers[config.API_KEY_HEADER.toLowerCase()] as string | undefined;
+    req.authenticated = !!key && config.API_KEYS.includes(key);
+    next();
+  };
+}

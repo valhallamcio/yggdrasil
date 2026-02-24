@@ -23,6 +23,11 @@ export function getDb(): Db {
   return db;
 }
 
+export function getClient(): MongoClient {
+  if (!client) throw new Error('Database not initialized. Call connectDatabase() first.');
+  return client;
+}
+
 export async function disconnectDatabase(): Promise<void> {
   if (client) {
     await client.close();

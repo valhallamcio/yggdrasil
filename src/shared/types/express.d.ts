@@ -8,5 +8,7 @@ declare module 'express-serve-static-core' {
     userId?: string;
     /** Raw request body buffer (captured before JSON parsing for HMAC verification) */
     rawBody?: Buffer;
+    /** Whether the request passed optional API-key authentication */
+    authenticated?: boolean;
   }
 }

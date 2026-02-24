@@ -43,6 +43,10 @@ export const configSchema = z.object({
   DISCORD_DONATIONS_LOG_CHANNEL_ID: z.string().optional(),
 
   DISCORD_SCREENSHOT_CHANNEL_ID: z.string().optional(),
+
+  PTERODACTYL_URL: z.string().url().optional(),
+  PTERODACTYL_API_KEY: z.string().optional(),
+  DISCORD_SERVER_STATUS_CHANNEL_ID: z.string().optional(),
 });
 
 export type Config = z.output<typeof configSchema>;

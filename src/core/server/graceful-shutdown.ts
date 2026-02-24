@@ -28,10 +28,16 @@ export function registerGracefulShutdown(server: HttpServer): void {
       // 2. Stop all scheduled jobs
       schedulerRegistry.stopAll();
 
-      // 3. Shutdown plugins in reverse order
+      // 3. Stop stats recorder and Pterodactyl WS connections
+      const { statsRecorder } = await import('../../domains/servers/stats-recorder.js');
+      statsRecorder.stop();
+      const { pterodactylWsManager } = await import('../../domains/servers/pterodactyl-ws.manager.js');
+      pterodactylWsManager.disconnect();
+
+      // 4. Shutdown plugins in reverse order
       await pluginRegistry.shutdownAll();
 
-      // 4. Disconnect from MongoDB
+      // 5. Disconnect from MongoDB
       await disconnectDatabase();
 
       clearTimeout(forceExitTimer);

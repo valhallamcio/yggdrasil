@@ -2,10 +2,8 @@
 // These packages are not installed by default and are only loaded at runtime
 // when their corresponding PLUGIN_* env var is enabled.
 // Install them when you enable the plugin:
-//   PLUGIN_WEBSOCKET=true  → npm install ws @types/ws
 //   PLUGIN_DISCORD=true    → npm install discord.js
 
 // Shorthand ambient module declarations — implicitly typed as `any`.
 // Replace with real types once the package is installed.
-declare module 'ws';
 declare module 'discord.js';
