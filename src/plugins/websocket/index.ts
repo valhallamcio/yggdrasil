@@ -77,6 +77,14 @@ export class WebSocketPlugin implements Plugin {
       this.broadcast({ type: 'server.recovered', payload });
     });
 
+    eventBus.on('server.crash-loop.started', (payload) => {
+      this.broadcast({ type: 'server.crash-loop.started', payload });
+    });
+
+    eventBus.on('server.crash-loop.ended', (payload) => {
+      this.broadcast({ type: 'server.crash-loop.ended', payload });
+    });
+
     // ── Console channel (per-server subscriptions) ──────────────────────────
     eventBus.on('server.console.output', ({ server, line }) => {
       const subscribers = this.consoleSubscriptions.get(server);

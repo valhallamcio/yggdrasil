@@ -19,6 +19,10 @@ interface PterodactylWsEvent {
 
 const MAX_RECONNECT_ATTEMPTS = 5;
 const BASE_RECONNECT_DELAY_MS = 1_000;
+const STUCK_STARTING_TIMEOUT_MS = 10 * 60_000; // 10 minutes
+const STUCK_STOPPING_TIMEOUT_MS = 5 * 60_000;  // 5 minutes
+const CRASH_LOOP_THRESHOLD = 3;
+const CRASH_LOOP_WINDOW_MS = 15 * 60_000; // 15 minutes
 
 /** Map of "previousState:newState" → anomaly definition. Only anomalous transitions are listed. */
 const ANOMALOUS_TRANSITIONS: Record<string, { reason: string; logLevel: 'warn' | 'info'; message: string }> = {
@@ -37,6 +41,10 @@ class PterodactylWsManager {
   private readonly statusCache = new Map<string, string>();
   private readonly serverLookup = new Map<string, ServerEntry>();
   private readonly reconnectAttempts = new Map<string, number>();
+  private readonly stuckTimers = new Map<string, NodeJS.Timeout>();
+  private readonly crashTimestamps = new Map<string, number[]>();
+  private readonly crashLoopFlags = new Set<string>();
+  private readonly crashLoopCooldowns = new Map<string, NodeJS.Timeout>();
   private readonly pterodactyl = new PterodactylClient();
   private shuttingDown = false;
 
@@ -93,6 +101,12 @@ class PterodactylWsManager {
 
   disconnect(): void {
     this.shuttingDown = true;
+    for (const timer of this.stuckTimers.values()) clearTimeout(timer);
+    this.stuckTimers.clear();
+    for (const timer of this.crashLoopCooldowns.values()) clearTimeout(timer);
+    this.crashLoopCooldowns.clear();
+    this.crashLoopFlags.clear();
+    this.crashTimestamps.clear();
     for (const tag of [...this.connections.keys()]) {
       this.disconnectServer(tag);
     }
@@ -120,10 +134,66 @@ class PterodactylWsManager {
       ws.close();
       this.connections.delete(tag);
     }
+    this.clearStuckTimer(tag);
+    const cooldown = this.crashLoopCooldowns.get(tag);
+    if (cooldown) clearTimeout(cooldown);
+    this.crashLoopCooldowns.delete(tag);
+    this.crashLoopFlags.delete(tag);
+    this.crashTimestamps.delete(tag);
     this.statsCache.delete(tag);
     this.statusCache.delete(tag);
     this.serverLookup.delete(tag);
     this.reconnectAttempts.delete(tag);
+  }
+
+  private clearStuckTimer(tag: string): void {
+    const timer = this.stuckTimers.get(tag);
+    if (timer) {
+      clearTimeout(timer);
+      this.stuckTimers.delete(tag);
+    }
+  }
+
+  private recordCrash(tag: string, entry: ServerEntry): void {
+    const now = Date.now();
+    const timestamps = this.crashTimestamps.get(tag) ?? [];
+    timestamps.push(now);
+    const cutoff = now - CRASH_LOOP_WINDOW_MS;
+    const recent = timestamps.filter((t) => t > cutoff);
+    this.crashTimestamps.set(tag, recent);
+
+    // Cancel any cooldown timer (server crashed again, still in loop)
+    const cooldown = this.crashLoopCooldowns.get(tag);
+    if (cooldown) {
+      clearTimeout(cooldown);
+      this.crashLoopCooldowns.delete(tag);
+    }
+
+    if (recent.length >= CRASH_LOOP_THRESHOLD && !this.crashLoopFlags.has(tag)) {
+      this.crashLoopFlags.add(tag);
+      logger.warn({ tag, name: entry.name, crashCount: recent.length }, 'Crash loop detected');
+      eventBus.emit('server.crash-loop.started', {
+        server: tag,
+        serverName: entry.name,
+        crashCount: recent.length,
+      });
+    }
+  }
+
+  private handleRecoveryCrashLoop(tag: string, entry: ServerEntry): void {
+    if (!this.crashLoopFlags.has(tag)) return;
+
+    this.crashLoopCooldowns.set(tag, setTimeout(() => {
+      this.crashLoopCooldowns.delete(tag);
+      if (!this.crashLoopFlags.has(tag)) return;
+      this.crashLoopFlags.delete(tag);
+      this.crashTimestamps.delete(tag);
+      logger.info({ tag, name: entry.name }, 'Crash loop ended');
+      eventBus.emit('server.crash-loop.ended', {
+        server: tag,
+        serverName: entry.name,
+      });
+    }, CRASH_LOOP_WINDOW_MS));
   }
 
   private async connectServer(tag: string, serverId: string): Promise<void> {
@@ -208,6 +278,9 @@ class PterodactylWsManager {
 
         if (previousState === newState) break;
 
+        // Clear any stuck-state timer — the server transitioned
+        this.clearStuckTimer(tag);
+
         eventBus.emit('server.state.changed', {
           server: tag,
           serverName: entry.name,
@@ -226,6 +299,7 @@ class PterodactylWsManager {
             currentState: newState,
             reason: anomaly.reason,
           });
+          this.recordCrash(tag, entry);
         }
 
         // Recovery: was offline/unknown, now running
@@ -235,16 +309,49 @@ class PterodactylWsManager {
             server: tag,
             serverName: entry.name,
           });
+          this.handleRecoveryCrashLoop(tag, entry);
+        }
+
+        // Stuck-state detection: start a timer if entering starting/stopping
+        if (newState === 'starting' || newState === 'stopping') {
+          const timeout = newState === 'starting' ? STUCK_STARTING_TIMEOUT_MS : STUCK_STOPPING_TIMEOUT_MS;
+          const reason = newState === 'starting' ? 'stuck-starting' : 'stuck-stopping';
+          this.stuckTimers.set(tag, setTimeout(() => {
+            this.stuckTimers.delete(tag);
+            if (this.statusCache.get(tag) !== newState) return;
+            logger.warn({ tag, name: entry.name, state: newState }, `Server stuck ${newState}`);
+            eventBus.emit('server.crashed', {
+              server: tag,
+              serverName: entry.name,
+              previousState: newState,
+              currentState: newState,
+              reason,
+            });
+            this.recordCrash(tag, entry);
+          }, timeout));
         }
         break;
       }
 
       case 'console output': {
         if (!msg.args?.[0]) break;
-        eventBus.emit('server.console.output', {
-          server: tag,
-          line: msg.args[0],
-        });
+        const line = msg.args[0];
+
+        // Cleanroom (and similar) crash detection via console output
+        if (line.includes('Considering it to be crashed, server will forcibly shutdown.')) {
+          const currentState = this.statusCache.get(tag) ?? 'unknown';
+          logger.warn({ tag, name: entry.name, currentState }, 'Crash detected from console output');
+          eventBus.emit('server.crashed', {
+            server: tag,
+            serverName: entry.name,
+            previousState: currentState,
+            currentState,
+            reason: 'console-crash',
+          });
+          this.recordCrash(tag, entry);
+        }
+
+        eventBus.emit('server.console.output', { server: tag, line });
         break;
       }
 

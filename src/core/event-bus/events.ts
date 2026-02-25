@@ -22,6 +22,8 @@ export type AppEvent =
   | { type: 'server.state.changed'; payload: { server: string; serverName: string; previousState: string; currentState: string } }
   | { type: 'server.crashed'; payload: { server: string; serverName: string; previousState: string; currentState: string; reason: string } }
   | { type: 'server.recovered'; payload: { server: string; serverName: string } }
+  | { type: 'server.crash-loop.started'; payload: { server: string; serverName: string; crashCount: number } }
+  | { type: 'server.crash-loop.ended'; payload: { server: string; serverName: string } }
   | { type: 'server.console.output'; payload: { server: string; line: string } };
 
 export type AppEventType = AppEvent['type'];

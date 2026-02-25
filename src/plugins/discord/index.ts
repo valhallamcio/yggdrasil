@@ -14,6 +14,7 @@ export class DiscordPlugin implements Plugin {
   private client: any;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private readonly webhookCache = new Map<string, any>();
+  private readonly crashLoopServers = new Set<string>();
 
   async init(_app: Express, _server: HttpServer): Promise<void> {
     if (!config.DISCORD_TOKEN) {
@@ -51,13 +52,17 @@ export class DiscordPlugin implements Plugin {
     eventBus.on('server.crashed', ({ server, serverName, previousState, currentState, reason }) => {
       const channelId = config.DISCORD_SERVER_STATUS_CHANNEL_ID;
       if (!channelId) return;
+      if (this.crashLoopServers.has(server)) return;
 
       const labels: Record<string, string> = {
         'crash':               'crashed',
+        'console-crash':       'crashed (detected from console)',
         'startup-crash':       'crashed during startup',
         'startup-lost':        'lost during startup',
         'unexpected-restart':  'restarted unexpectedly',
         'restart-during-stop': 'restarted during shutdown',
+        'stuck-starting':      'stuck starting',
+        'stuck-stopping':      'stuck stopping',
         'stop-lost':           'lost during shutdown',
       };
 
@@ -70,7 +75,22 @@ export class DiscordPlugin implements Plugin {
     eventBus.on('server.recovered', ({ server, serverName }) => {
       const channelId = config.DISCORD_SERVER_STATUS_CHANNEL_ID;
       if (!channelId) return;
+      if (this.crashLoopServers.has(server)) return;
       void this.sendMessage(channelId, `**${serverName}** (\`${server}\`) is back online.`);
+    });
+
+    eventBus.on('server.crash-loop.started', ({ server, serverName, crashCount }) => {
+      this.crashLoopServers.add(server);
+      const channelId = config.DISCORD_SERVER_STATUS_CHANNEL_ID;
+      if (!channelId) return;
+      void this.sendMessage(channelId, `**${serverName}** (\`${server}\`) is crash looping (${crashCount} crashes in 15 min).`);
+    });
+
+    eventBus.on('server.crash-loop.ended', ({ server, serverName }) => {
+      this.crashLoopServers.delete(server);
+      const channelId = config.DISCORD_SERVER_STATUS_CHANNEL_ID;
+      if (!channelId) return;
+      void this.sendMessage(channelId, `**${serverName}** (\`${server}\`) is no longer crash looping.`);
     });
   }
 
