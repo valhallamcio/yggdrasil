@@ -45,6 +45,7 @@ class PterodactylWsManager {
   private readonly crashTimestamps = new Map<string, number[]>();
   private readonly crashLoopFlags = new Set<string>();
   private readonly crashLoopCooldowns = new Map<string, NodeJS.Timeout>();
+  private readonly consoleCrashFlags = new Set<string>();
   private readonly pterodactyl = new PterodactylClient();
   private shuttingDown = false;
 
@@ -107,6 +108,7 @@ class PterodactylWsManager {
     this.crashLoopCooldowns.clear();
     this.crashLoopFlags.clear();
     this.crashTimestamps.clear();
+    this.consoleCrashFlags.clear();
     for (const tag of [...this.connections.keys()]) {
       this.disconnectServer(tag);
     }
@@ -140,6 +142,7 @@ class PterodactylWsManager {
     this.crashLoopCooldowns.delete(tag);
     this.crashLoopFlags.delete(tag);
     this.crashTimestamps.delete(tag);
+    this.consoleCrashFlags.delete(tag);
     this.statsCache.delete(tag);
     this.statusCache.delete(tag);
     this.serverLookup.delete(tag);
@@ -291,19 +294,25 @@ class PterodactylWsManager {
         // Anomaly detection (crashes, startup failures, unexpected restarts, etc.)
         const anomaly = ANOMALOUS_TRANSITIONS[`${previousState}:${newState}`];
         if (anomaly) {
-          logger[anomaly.logLevel]({ tag, name: entry.name, previousState, newState, reason: anomaly.reason }, anomaly.message);
-          eventBus.emit('server.crashed', {
-            server: tag,
-            serverName: entry.name,
-            previousState,
-            currentState: newState,
-            reason: anomaly.reason,
-          });
-          this.recordCrash(tag, entry);
+          if (this.consoleCrashFlags.has(tag)) {
+            // Console already detected this crash — skip duplicate emission
+            this.consoleCrashFlags.delete(tag);
+          } else {
+            logger[anomaly.logLevel]({ tag, name: entry.name, previousState, newState, reason: anomaly.reason }, anomaly.message);
+            eventBus.emit('server.crashed', {
+              server: tag,
+              serverName: entry.name,
+              previousState,
+              currentState: newState,
+              reason: anomaly.reason,
+            });
+            this.recordCrash(tag, entry);
+          }
         }
 
         // Recovery: was offline/unknown, now running
         if ((previousState === 'offline' || previousState === 'unknown') && newState === 'running') {
+          this.consoleCrashFlags.delete(tag);
           logger.info({ tag, name: entry.name }, 'Server recovered');
           eventBus.emit('server.recovered', {
             server: tag,
@@ -337,10 +346,18 @@ class PterodactylWsManager {
         if (!msg.args?.[0]) break;
         const line = msg.args[0];
 
-        // Cleanroom (and similar) crash detection via console output
-        if (line.includes('Considering it to be crashed, server will forcibly shutdown.')) {
+        // Strip ANSI escape codes for pattern matching (Pterodactyl relays raw console output)
+        // eslint-disable-next-line no-control-regex
+        const cleanLine = line.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+
+        // Crash detection via console output patterns
+        if (
+          cleanLine.includes('Considering it to be crashed, server will forcibly shutdown.') ||
+          cleanLine.includes('---- Minecraft Crash Report ----')
+        ) {
           const currentState = this.statusCache.get(tag) ?? 'unknown';
           logger.warn({ tag, name: entry.name, currentState }, 'Crash detected from console output');
+          this.consoleCrashFlags.add(tag);
           eventBus.emit('server.crashed', {
             server: tag,
             serverName: entry.name,

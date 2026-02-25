@@ -13,6 +13,9 @@ import { requestId } from './middleware/request-id.js';
 export function createApp(): Express {
   const app = express();
 
+  // ── Proxy trust (behind reverse proxy e.g. Nginx, Pterodactyl) ────────────
+  app.set('trust proxy', 1);
+
   // ── Security ──────────────────────────────────────────────────────────────
   app.use(helmet());
   app.use(
