@@ -29,3 +29,19 @@ export interface KofiPayload {
   kofi_transaction_id: string;
   url: string;
 }
+
+/** MongoDB document shape for a persisted donation event */
+export interface DonationDocument {
+  provider: 'kofi' | 'patreon';
+  donorName: string;
+  amount: string;
+  currency: string;
+  message?: string;
+  email?: string;
+  isSubscription: boolean;
+  isFirstSubscription?: boolean;
+  rawEventType: string;
+  isPublic: boolean;
+  extras?: Record<string, string | number | boolean | null>;
+  createdAt: Date;
+}

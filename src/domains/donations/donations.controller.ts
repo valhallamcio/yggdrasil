@@ -18,6 +18,7 @@ export class DonationsController {
       'Ko-fi webhook processed'
     );
 
+    await this.service.save(event);
     this.service.notifyDiscord(event);
     res.status(200).json({ received: true });
   };
@@ -40,6 +41,7 @@ export class DonationsController {
       'Patreon webhook processed'
     );
 
+    await this.service.save(event);
     this.service.notifyDiscord(event);
     res.status(200).json({ received: true });
   };

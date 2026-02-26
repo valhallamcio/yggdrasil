@@ -5,6 +5,7 @@ import { eventBus } from '../../core/event-bus/index.js';
 import { UnauthorizedError, InternalError } from '../../shared/errors/index.js';
 import { kofiPayloadSchema } from './donations.schema.js';
 import type { DonationEvent } from './donations.types.js';
+import type { DonationsRepository } from './donations.repository.js';
 
 const KOFI_PUBLIC_TYPES = new Set(['Donation', 'Subscription']);
 const PATREON_PUBLIC_EVENTS = new Set(['members:pledge:create']);
@@ -23,6 +24,12 @@ function camelToTitle(key: string): string {
 }
 
 export class DonationsService {
+  constructor(private readonly repo: DonationsRepository) {}
+
+  async save(event: DonationEvent): Promise<void> {
+    await this.repo.insertOne({ ...event, createdAt: new Date() });
+  }
+
   // ── Ko-fi ──────────────────────────────────────────────────────────────────
 
   processKofi(rawDataString: string): DonationEvent {
