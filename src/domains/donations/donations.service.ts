@@ -9,6 +9,19 @@ import type { DonationEvent } from './donations.types.js';
 const KOFI_PUBLIC_TYPES = new Set(['Donation', 'Subscription']);
 const PATREON_PUBLIC_EVENTS = new Set(['members:pledge:create']);
 
+function maskEmail(email: string): string {
+  const [local, domain] = email.split('@');
+  if (!domain) return email;
+  return `${local}@\\*\\*\\*.\\*\\*\\*`;
+}
+
+function camelToTitle(key: string): string {
+  return key
+    .replace(/([A-Z])/g, ' $1')
+    .replace(/^./, (c) => c.toUpperCase())
+    .trim();
+}
+
 export class DonationsService {
   // ── Ko-fi ──────────────────────────────────────────────────────────────────
 
@@ -48,9 +61,17 @@ export class DonationsService {
       amount: payload.amount,
       currency: payload.currency,
       message: payload.message ?? undefined,
+      email: payload.email,
       isSubscription: payload.is_subscription_payment ?? false,
+      isFirstSubscription: payload.is_first_subscription_payment ?? undefined,
       rawEventType: payload.type,
       isPublic: KOFI_PUBLIC_TYPES.has(payload.type),
+      extras: {
+        transactionId: payload.kofi_transaction_id,
+        timestamp: payload.timestamp ?? null,
+        messageId: payload.message_id ?? null,
+        isKofiPublic: payload.is_public ?? null,
+      },
     };
   }
 
@@ -80,13 +101,30 @@ export class DonationsService {
 
   processPatreon(body: unknown, eventType: string): DonationEvent {
     const payload = body as {
-      data: { attributes: { amount_cents: number; currency: string; note?: string } };
-      included?: Array<{ type: string; attributes: { full_name?: string; name?: string } }>;
+      data: {
+        attributes: {
+          amount_cents?: number;
+          currency?: string;
+          note?: string;
+          patron_status?: string;
+          last_charge_date?: string;
+          last_charge_status?: string;
+          lifetime_support_cents?: number;
+          pledge_relationship_start?: string;
+          currently_entitled_amount_cents?: number;
+          is_follower?: boolean;
+        };
+      };
+      included?: Array<{
+        type: string;
+        attributes: { full_name?: string; name?: string; email?: string };
+      }>;
     };
 
-    const amountCents = payload.data?.attributes?.amount_cents ?? 0;
-    const currency = payload.data?.attributes?.currency ?? 'USD';
-    const note = payload.data?.attributes?.note;
+    const attrs = payload.data?.attributes;
+    const amountCents = attrs?.amount_cents ?? 0;
+    const currency = attrs?.currency ?? 'USD';
+    const note = attrs?.note;
 
     const patronUser = payload.included?.find((inc) => inc.type === 'user');
     const donorName =
@@ -98,9 +136,19 @@ export class DonationsService {
       amount: (amountCents / 100).toFixed(2),
       currency,
       message: note,
+      email: patronUser?.attributes.email,
       isSubscription: true,
       rawEventType: eventType,
       isPublic: PATREON_PUBLIC_EVENTS.has(eventType),
+      extras: {
+        patronStatus: attrs?.patron_status ?? null,
+        lastChargeDate: attrs?.last_charge_date ?? null,
+        lastChargeStatus: attrs?.last_charge_status ?? null,
+        lifetimeSupportCents: attrs?.lifetime_support_cents ?? null,
+        pledgeStart: attrs?.pledge_relationship_start ?? null,
+        entitledAmountCents: attrs?.currently_entitled_amount_cents ?? null,
+        isFollower: attrs?.is_follower ?? null,
+      },
     };
   }
 
@@ -114,7 +162,9 @@ export class DonationsService {
     if (event.provider === 'kofi') {
       switch (event.rawEventType) {
         case 'Subscription':
-          action = `just subscribed for **${amountStr}/mo**`;
+          action = event.isFirstSubscription
+            ? `subscribed for **${amountStr}**/mo`
+            : `donated **${amountStr}** (monthly)`;
           break;
         case 'Commission':
           action = `commissioned for **${amountStr}**`;
@@ -123,12 +173,12 @@ export class DonationsService {
           action = `placed a shop order for **${amountStr}**`;
           break;
         default:
-          action = `just donated **${amountStr}**`;
+          action = `donated **${amountStr}**`;
       }
     } else {
       switch (event.rawEventType) {
         case 'members:pledge:create':
-          action = `just pledged **${amountStr}**`;
+          action = `pledged **${amountStr}**`;
           break;
         case 'members:pledge:update':
           action = `updated their pledge to **${amountStr}**`;
@@ -145,22 +195,64 @@ export class DonationsService {
     return event.message ? `${base}\n> *${event.message}*` : base;
   }
 
+  formatLogMessage(event: DonationEvent): string {
+    const providerLabel = event.provider === 'kofi' ? 'Ko-fi' : 'Patreon';
+
+    let subscriptionStr = event.isSubscription ? 'Yes' : 'No';
+    if (event.isFirstSubscription) subscriptionStr += ' (first)';
+
+    const lines = [
+      `[${providerLabel}] ${event.rawEventType} from **${event.donorName}**`,
+    ];
+
+    if (event.email) {
+      lines.push(`> **Email:** ${maskEmail(event.email)}`);
+    }
+
+    lines.push(
+      `> **Amount:** ${event.currency} ${event.amount}`,
+      `> **Event type:** ${event.rawEventType}`,
+      `> **Subscription:** ${subscriptionStr}`,
+      `> **Public:** ${event.isPublic ? 'Yes' : 'No'}`,
+    );
+
+    if (event.extras) {
+      for (const [key, value] of Object.entries(event.extras)) {
+        if (value == null) continue;
+        lines.push(`> **${camelToTitle(key)}:** ${String(value)}`);
+      }
+    }
+
+    if (event.message) {
+      lines.push(`> **Message:** ${event.message}`);
+    }
+
+    return lines.join('\n');
+  }
+
   // ── Notify ─────────────────────────────────────────────────────────────────
 
   notifyDiscord(event: DonationEvent): void {
-    const channelId = event.isPublic
-      ? config.DISCORD_DONATIONS_CHANNEL_ID
-      : config.DISCORD_DONATIONS_LOG_CHANNEL_ID;
+    const logChannelId = config.DISCORD_DONATIONS_LOG_CHANNEL_ID;
 
-    if (!channelId) {
-      logger.warn(
-        { provider: event.provider, isPublic: event.isPublic },
-        'No Discord channel configured for donation notification'
-      );
-      return;
+    if (logChannelId) {
+      const logMessage = this.formatLogMessage(event);
+      eventBus.emit('donation.received', { channelId: logChannelId, message: logMessage });
     }
 
-    const message = this.formatDiscordMessage(event);
-    eventBus.emit('donation.received', { channelId, message });
+    if (event.isPublic) {
+      const publicChannelId = config.DISCORD_DONATIONS_CHANNEL_ID;
+      if (publicChannelId) {
+        const publicMessage = this.formatDiscordMessage(event);
+        eventBus.emit('donation.received', { channelId: publicChannelId, message: publicMessage });
+      }
+    }
+
+    if (!logChannelId && !(event.isPublic && config.DISCORD_DONATIONS_CHANNEL_ID)) {
+      logger.warn(
+        { provider: event.provider, isPublic: event.isPublic },
+        'No Discord channel configured for donation notification',
+      );
+    }
   }
 }

@@ -13,8 +13,13 @@ export const kofiPayloadSchema = z.object({
   amount: z.string(),
   currency: z.string(),
   message: z.string().nullable().optional(),
+  email: z.string().optional(),
   is_subscription_payment: z.boolean().optional(),
+  is_first_subscription_payment: z.boolean().optional(),
   kofi_transaction_id: z.string(),
+  timestamp: z.string().optional(),
+  message_id: z.string().optional(),
+  is_public: z.boolean().optional(),
 });
 
 export type KofiBody = z.infer<typeof kofiBodySchema>;

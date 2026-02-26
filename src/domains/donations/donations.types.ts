@@ -5,9 +5,13 @@ export interface DonationEvent {
   amount: string;
   currency: string;
   message?: string;
+  email?: string;
   isSubscription: boolean;
+  isFirstSubscription?: boolean;
   rawEventType: string;
   isPublic: boolean;
+  /** Provider-specific fields for detailed logging */
+  extras?: Record<string, string | number | boolean | null>;
 }
 
 /** Raw Ko-fi webhook payload (parsed from the body.data JSON string) */
