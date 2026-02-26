@@ -137,10 +137,16 @@ export class ShowcaseService {
       return tb - ta;
     });
 
-    return sorted.slice(0, count).map((post, index) => ({
-      ...post,
-      isLarge: index === 0,
-      isTall: index === 3,
-    }));
+    return sorted.slice(0, count).map((post) => {
+      const img = post.images[0];
+      const w = img?.width ?? 0;
+      const h = img?.height ?? 0;
+
+      return {
+        ...post,
+        isLarge: w > h,
+        isTall: h > w,
+      };
+    });
   }
 }

@@ -33,7 +33,6 @@ export const FALLBACK_POSTS: ShowcasePost[] = [
     images: [{ url: '/images/flaszValh_banner01.jpg' }],
     author: 'ValhallaMC',
     caption: 'Gameplay',
-    isLarge: true,
   },
   {
     messageId: 'fallback-2',
@@ -52,7 +51,6 @@ export const FALLBACK_POSTS: ShowcasePost[] = [
     images: [{ url: '/images/flaszValh_banner01.jpg' }],
     author: 'Community',
     caption: 'Screenshot',
-    isTall: true,
   },
   {
     messageId: 'fallback-5',
