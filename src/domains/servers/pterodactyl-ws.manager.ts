@@ -269,7 +269,7 @@ class PterodactylWsManager {
         if (!msg.args?.[0]) break;
         const stats = JSON.parse(msg.args[0]) as PterodactylStats;
         this.statsCache.set(tag, stats);
-        eventBus.emit('server.stats', { server: tag, stats });
+        eventBus.emit('server.stats', { server: tag, serverOid: entry.serverOid, stats });
         break;
       }
 

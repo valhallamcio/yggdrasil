@@ -1,10 +1,12 @@
+import type { ObjectId } from 'mongodb';
 import { eventBus } from '../../core/event-bus/index.js';
 import { getDb } from '../../core/database/client.js';
 import { logger } from '../../core/logger/index.js';
 import { ServersRepository } from './servers.repository.js';
 import type { StatsHistoryDocument } from './servers.types.js';
 import type { ServerStatsPayload } from '../../core/event-bus/events.js';
-const THROTTLE_MS = 30_000; // Write at most once every 30 seconds per server
+
+const THROTTLE_MS = 60_000; // Write at most once every 60 seconds per server
 
 class StatsRecorder {
   private readonly lastWrite = new Map<string, number>();
@@ -12,18 +14,26 @@ class StatsRecorder {
   private listening = false;
 
   async start(): Promise<void> {
+    const db = getDb();
+
     // Ensure time series collection exists
     try {
-      await getDb().createCollection('server_stats_history', {
+      await db.createCollection('server_stats_history', {
         timeseries: {
           timeField: 'timestamp',
           metaField: 'server',
-          granularity: 'seconds',
+          granularity: 'minutes',
         },
       });
       logger.info('Created server_stats_history time series collection');
     } catch {
-      // Collection already exists — ignore
+      // Collection already exists — try to upgrade granularity
+      try {
+        await db.command({ collMod: 'server_stats_history', timeseries: { granularity: 'minutes' } });
+        logger.info('Upgraded server_stats_history granularity to minutes');
+      } catch {
+        // Already at minutes or higher — ignore
+      }
     }
 
     this.repo = new ServersRepository();
@@ -38,7 +48,7 @@ class StatsRecorder {
     logger.info('Stats recorder stopped');
   }
 
-  private onStats = ({ server, stats }: { server: string; stats: ServerStatsPayload }): void => {
+  private onStats = ({ server, serverOid, stats }: { server: string; serverOid: ObjectId; stats: ServerStatsPayload }): void => {
     if (!this.listening) return;
 
     const now = Date.now();
@@ -46,26 +56,19 @@ class StatsRecorder {
     if (now - lastTime < THROTTLE_MS) return;
 
     this.lastWrite.set(server, now);
-    void this.record(server, stats);
+    void this.record(server, serverOid, stats);
   };
 
-  private async record(tag: string, stats: ServerStatsPayload): Promise<void> {
+  private async record(tag: string, serverOid: ObjectId, stats: ServerStatsPayload): Promise<void> {
     try {
-      // Get shard data for TPS and players
       let tps = 0;
       let players = 0;
 
       if (this.repo) {
-        const allShards = await this.repo.findAllShards();
-        // Find the shard matching this server by cross-referencing
-        const servers = await this.repo.findAllForSync();
-        const serverDoc = servers.find((s) => s.tag === tag);
-        if (serverDoc) {
-          const shard = allShards.find((s) => s.server.equals(serverDoc._id));
-          if (shard) {
-            tps = shard.tps;
-            players = shard.players;
-          }
+        const shard = await this.repo.findShardByServerRef(serverOid);
+        if (shard) {
+          tps = Math.round(shard.tps * 100) / 100;
+          players = shard.players;
         }
       }
 
@@ -73,7 +76,7 @@ class StatsRecorder {
         timestamp: new Date(),
         server: tag,
         status: stats.state,
-        cpu: stats.cpu_absolute,
+        cpu: Math.round(stats.cpu_absolute * 100) / 100,
         memoryBytes: stats.memory_bytes,
         memoryLimitBytes: stats.memory_limit_bytes,
         diskBytes: stats.disk_bytes,

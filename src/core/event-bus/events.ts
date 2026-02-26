@@ -18,7 +18,7 @@ export type AppEvent =
   | { type: 'scheduler.job.completed'; payload: { jobId: string; durationMs: number } }
   | { type: 'scheduler.job.failed'; payload: { jobId: string; error: string } }
   | { type: 'donation.received'; payload: { channelId: string; message: string } }
-  | { type: 'server.stats'; payload: { server: string; stats: ServerStatsPayload } }
+  | { type: 'server.stats'; payload: { server: string; serverOid: import('mongodb').ObjectId; stats: ServerStatsPayload } }
   | { type: 'server.state.changed'; payload: { server: string; serverName: string; previousState: string; currentState: string } }
   | { type: 'server.crashed'; payload: { server: string; serverName: string; previousState: string; currentState: string; reason: string } }
   | { type: 'server.recovered'; payload: { server: string; serverName: string } }
