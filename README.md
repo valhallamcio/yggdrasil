@@ -163,6 +163,8 @@ Health check: `GET /health` (returns 200 or 503)
 | PUT | `/:nick/:tag/position` | API Key | — | Update position |
 | GET | `/:nick/:tag/advancements` | API Key | — | Player advancements |
 
+> `:nick` accepts either a username or a Minecraft UUID (with or without dashes).
+
 ### Showcase `/v1/showcase`
 
 | Method | Path | Auth | Query Params | Description |

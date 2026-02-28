@@ -1,11 +1,11 @@
 import { z } from 'zod';
 
 export const playerParamsSchema = z.object({
-  nick: z.string().min(1).max(32),
+  nick: z.string().min(1).max(36),
 });
 
 export const playerServerParamsSchema = z.object({
-  nick: z.string().min(1).max(32),
+  nick: z.string().min(1).max(36),
   tag: z.string().min(1).max(20),
 });
 

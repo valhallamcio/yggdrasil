@@ -1,4 +1,4 @@
-import type { Collection, WithId } from 'mongodb';
+import type { Binary, Collection, WithId } from 'mongodb';
 import { getClient, getDb } from '../../core/database/client.js';
 import type { PlayerDocument, PlayerHistoryDocument, PlayerSessionDocument, PeakRecord } from './players.types.js';
 
@@ -52,6 +52,10 @@ export class PlayersRepository {
 
   async findByUsername(username: string): Promise<WithId<PlayerDocument> | null> {
     return this.players.findOne({ username: { $regex: new RegExp(`^${escapeRegex(username)}$`, 'i') } });
+  }
+
+  async findByUuid(uuid: Binary): Promise<WithId<PlayerDocument> | null> {
+    return this.players.findOne({ uuid });
   }
 
   async searchByUsername(query: string, limit: number): Promise<WithId<PlayerDocument>[]> {

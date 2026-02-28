@@ -3,7 +3,7 @@ import type { PlayersRepository } from './players.repository.js';
 import { PterodactylClient } from '../servers/pterodactyl.client.js';
 import { ServersRepository } from '../servers/servers.repository.js';
 import { metricsCollector } from './metrics-collector.js';
-import { binaryToUuid } from '../../shared/utils/uuid.js';
+import { binaryToUuid, uuidToBinary } from '../../shared/utils/uuid.js';
 import { AppError, NotFoundError } from '../../shared/errors/index.js';
 import { logger } from '../../core/logger/index.js';
 import { playerStatsRecorder } from './player-stats-recorder.js';
@@ -31,6 +31,13 @@ async function getNbt() {
   }
   // eslint-disable-next-line @typescript-eslint/no-unsafe-return
   return nbtLib;
+}
+
+const UUID_RE = /^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$/i;
+
+function normalizeUuid(input: string): string {
+  const hex = input.replace(/-/g, '');
+  return `${hex.substring(0, 8)}-${hex.substring(8, 12)}-${hex.substring(12, 16)}-${hex.substring(16, 20)}-${hex.substring(20)}`;
 }
 
 function earliestDate(rec: Record<string, Date>): Date {
@@ -372,9 +379,11 @@ export class PlayersService {
     throw new NotFoundError('Player data', `${nick}" on server "${tag}`);
   }
 
-  private async requirePlayer(nick: string): Promise<WithId<PlayerDocument>> {
-    const doc = await this.repo.findByUsername(nick);
-    if (!doc) throw new NotFoundError('Player', nick);
+  private async requirePlayer(identifier: string): Promise<WithId<PlayerDocument>> {
+    const doc = UUID_RE.test(identifier)
+      ? await this.repo.findByUuid(uuidToBinary(normalizeUuid(identifier)))
+      : await this.repo.findByUsername(identifier);
+    if (!doc) throw new NotFoundError('Player', identifier);
     return doc;
   }
 
