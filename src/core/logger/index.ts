@@ -9,8 +9,7 @@ export const logger = pino({
       options: { colorize: true, translateTime: 'SYS:standard' },
     },
   }),
-  base: { service: 'yggdrasil', env: config.NODE_ENV },
-  redact: ['req.headers.authorization', 'req.headers["x-api-key"]'],
+  base: { env: config.NODE_ENV },
 });
 
 export type Logger = typeof logger;
