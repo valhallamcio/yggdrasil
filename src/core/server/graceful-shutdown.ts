@@ -28,11 +28,19 @@ export function registerGracefulShutdown(server: HttpServer): void {
       // 2. Stop all scheduled jobs
       schedulerRegistry.stopAll();
 
-      // 3. Stop stats recorder and Pterodactyl WS connections
+      // 3. Stop stats recorders and live connections
       const { statsRecorder } = await import('../../domains/servers/stats-recorder.js');
       statsRecorder.stop();
       const { pterodactylWsManager } = await import('../../domains/servers/pterodactyl-ws.manager.js');
       pterodactylWsManager.disconnect();
+      const { metricsCollector } = await import('../../domains/players/metrics-collector.js');
+      metricsCollector.stop();
+      const { playerStatsRecorder } = await import('../../domains/players/player-stats-recorder.js');
+      playerStatsRecorder.stop();
+      const { sessionRecorder } = await import('../../domains/players/session-recorder.js');
+      sessionRecorder.stop();
+      const { peakTracker } = await import('../../domains/players/peak-tracker.js');
+      peakTracker.stop();
 
       // 4. Shutdown plugins in reverse order
       await pluginRegistry.shutdownAll();

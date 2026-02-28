@@ -47,6 +47,8 @@ export const configSchema = z.object({
   PTERODACTYL_URL: z.string().url().optional(),
   PTERODACTYL_API_KEY: z.string().optional(),
   DISCORD_SERVER_STATUS_CHANNEL_ID: z.string().optional(),
+
+  VELOCITY_METRICS_URL: z.string().url().optional(),
 });
 
 export type Config = z.output<typeof configSchema>;

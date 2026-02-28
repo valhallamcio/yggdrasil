@@ -85,6 +85,23 @@ export class WebSocketPlugin implements Plugin {
       this.broadcast({ type: 'server.crash-loop.ended', payload });
     });
 
+    // ── Player channel (broadcast to all) ──────────────────────────────────
+    eventBus.on('player.joined', (payload) => {
+      this.broadcast({ type: 'player.joined', payload });
+    });
+
+    eventBus.on('player.left', (payload) => {
+      this.broadcast({ type: 'player.left', payload });
+    });
+
+    eventBus.on('player.server.changed', (payload) => {
+      this.broadcast({ type: 'player.server.changed', payload });
+    });
+
+    eventBus.on('player.list.updated', (payload) => {
+      this.broadcast({ type: 'player.list.updated', payload });
+    });
+
     // ── Console channel (per-server subscriptions) ──────────────────────────
     eventBus.on('server.console.output', ({ server, line }) => {
       const subscribers = this.consoleSubscriptions.get(server);

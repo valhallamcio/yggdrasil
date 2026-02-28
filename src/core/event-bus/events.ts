@@ -24,7 +24,17 @@ export type AppEvent =
   | { type: 'server.recovered'; payload: { server: string; serverName: string } }
   | { type: 'server.crash-loop.started'; payload: { server: string; serverName: string; crashCount: number } }
   | { type: 'server.crash-loop.ended'; payload: { server: string; serverName: string } }
-  | { type: 'server.console.output'; payload: { server: string; line: string } };
+  | { type: 'server.console.output'; payload: { server: string; line: string } }
+  | { type: 'player.joined'; payload: { username: string; server: string; latencyP95: number } }
+  | { type: 'player.left'; payload: { username: string; server: string } }
+  | { type: 'player.server.changed'; payload: { username: string; previousServer: string; currentServer: string } }
+  | {
+      type: 'player.list.updated';
+      payload: {
+        servers: Record<string, Array<{ username: string; latencyP95: number; latencyAvg: number; latencyMin: number; latencyMax: number }>>;
+        count: number;
+      };
+    };
 
 export type AppEventType = AppEvent['type'];
 export type AppEventPayload<T extends AppEventType> = Extract<AppEvent, { type: T }>['payload'];

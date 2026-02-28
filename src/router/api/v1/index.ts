@@ -3,6 +3,7 @@ import { Router } from 'express';
 import { donationsRouter } from '../../../domains/donations/donations.router.js';
 import { showcaseRouter } from '../../../domains/showcase/showcase.router.js';
 import { serversRouter } from '../../../domains/servers/servers.router.js';
+import { playersRouter } from '../../../domains/players/players.router.js';
 
 // v1 router — the single place that defines URL structure for API v1.
 // Adding a new domain: one import + one use() call here.
@@ -12,3 +13,4 @@ export const v1Router = Router();
 v1Router.use('/donations', donationsRouter);
 v1Router.use('/showcase', showcaseRouter);
 v1Router.use('/servers', serversRouter);
+v1Router.use('/players', playersRouter);

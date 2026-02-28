@@ -90,6 +90,32 @@ export class PterodactylClient {
     return res.text();
   }
 
+  async readBinaryFile(serverId: string, filePath: string): Promise<Buffer> {
+    const url = `${this.baseUrl}/api/client/servers/${serverId}/files/contents?file=${encodeURIComponent(filePath)}`;
+    const res = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${this.apiKey}`,
+      },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) throw new PterodactylError(`Pterodactyl binary file read returned ${res.status}`);
+    return Buffer.from(await res.arrayBuffer());
+  }
+
+  async writeBinaryFile(serverId: string, filePath: string, content: Buffer): Promise<void> {
+    const url = `${this.baseUrl}/api/client/servers/${serverId}/files/write?file=${encodeURIComponent(filePath)}`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${this.apiKey}`,
+        'Content-Type': 'application/octet-stream',
+      },
+      body: content as unknown as BodyInit,
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) throw new PterodactylError(`Pterodactyl binary file write returned ${res.status}`);
+  }
+
   async writeFile(serverId: string, filePath: string, content: string): Promise<void> {
     const url = `${this.baseUrl}/api/client/servers/${serverId}/files/write?file=${encodeURIComponent(filePath)}`;
     const res = await fetch(url, {

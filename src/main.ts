@@ -31,6 +31,22 @@ async function bootstrap(): Promise<void> {
   const { statsRecorder } = await import('./domains/servers/stats-recorder.js');
   await statsRecorder.start();
 
+  // 1e. Initialize player metrics collector (Velocity proxy Prometheus)
+  const { metricsCollector } = await import('./domains/players/metrics-collector.js');
+  await metricsCollector.start();
+
+  // 1f. Start recording player stats to time series collection
+  const { playerStatsRecorder } = await import('./domains/players/player-stats-recorder.js');
+  await playerStatsRecorder.start();
+
+  // 1g. Start recording player sessions
+  const { sessionRecorder } = await import('./domains/players/session-recorder.js');
+  await sessionRecorder.start();
+
+  // 1h. Start peak tracker
+  const { peakTracker } = await import('./domains/players/peak-tracker.js');
+  peakTracker.start();
+
   // 2. Build the Express app (pure, no I/O)
   const app = createApp();
 

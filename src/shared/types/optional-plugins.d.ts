@@ -7,3 +7,4 @@
 // Shorthand ambient module declarations — implicitly typed as `any`.
 // Replace with real types once the package is installed.
 declare module 'discord.js';
+declare module 'mc-nbt-lib';
