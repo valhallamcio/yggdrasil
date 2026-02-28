@@ -4,6 +4,19 @@ import type { ServerDocument, ShardDocument, StatsHistoryDocument } from './serv
 
 const DB_NAME = 'valhallamc';
 
+const HOUR = 3_600_000;
+
+function pickBucket(rangeMs: number): { unit: 'minute' | 'hour' | 'day'; binSize: number } | null {
+  const hours = rangeMs / HOUR;
+  if (hours <= 2) return null;            // raw
+  if (hours <= 12) return { unit: 'minute', binSize: 5 };
+  if (hours <= 48) return { unit: 'minute', binSize: 15 };
+  if (hours <= 168) return { unit: 'hour', binSize: 1 };
+  if (hours <= 720) return { unit: 'hour', binSize: 4 };
+  if (hours <= 2160) return { unit: 'hour', binSize: 12 };
+  return { unit: 'day', binSize: 1 };
+}
+
 export class ServersRepository {
   private _servers?: Collection<ServerDocument>;
   private _shards?: Collection<ShardDocument>;
@@ -53,9 +66,54 @@ export class ServersRepository {
   // ── Stats History ────────────────────────────────────────────────────────
 
   async findStatsHistory(tag: string, from: Date, to: Date): Promise<StatsHistoryDocument[]> {
+    const bucket = pickBucket(to.getTime() - from.getTime());
+
+    if (!bucket) {
+      return this.history
+        .find({ server: tag, timestamp: { $gte: from, $lte: to } })
+        .sort({ timestamp: 1 })
+        .toArray();
+    }
+
     return this.history
-      .find({ server: tag, timestamp: { $gte: from, $lte: to } })
-      .sort({ timestamp: 1 })
+      .aggregate<StatsHistoryDocument>([
+        { $match: { server: tag, timestamp: { $gte: from, $lte: to } } },
+        { $sort: { timestamp: 1 } },
+        {
+          $group: {
+            _id: { $dateTrunc: { date: '$timestamp', unit: bucket.unit, binSize: bucket.binSize } },
+            server: { $first: '$server' },
+            status: { $last: '$status' },
+            cpu: { $avg: '$cpu' },
+            memoryBytes: { $avg: '$memoryBytes' },
+            memoryLimitBytes: { $max: '$memoryLimitBytes' },
+            diskBytes: { $avg: '$diskBytes' },
+            networkRxBytes: { $max: '$networkRxBytes' },
+            networkTxBytes: { $max: '$networkTxBytes' },
+            uptime: { $max: '$uptime' },
+            tps: { $avg: '$tps' },
+            players: { $max: '$players' },
+          },
+        },
+        { $sort: { _id: 1 } },
+        {
+          $project: {
+            _id: 0,
+            timestamp: '$_id',
+            server: 1,
+            status: 1,
+            cpu: { $round: ['$cpu', 2] },
+            memoryBytes: { $round: ['$memoryBytes', 0] },
+            memoryLimitBytes: 1,
+            diskBytes: { $round: ['$diskBytes', 0] },
+            networkRxBytes: 1,
+            networkTxBytes: 1,
+            uptime: 1,
+            tps: { $round: ['$tps', 2] },
+            players: 1,
+          },
+        },
+      ])
       .toArray();
   }
 }
