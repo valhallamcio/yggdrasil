@@ -147,6 +147,40 @@ export interface FileEntryDto {
   modifiedAt: string;
 }
 
+// ── Server Registry (local mirror) ───────────────────────────────────────────
+
+export interface ServerRegistryDocument {
+  tag: string;
+  name: string;
+  desc: string;
+  color: string;
+  image: string;
+  genre: string;
+  platform: string;
+  serverVersion: string;
+  modpackVersion: string;
+  earlyAccess: boolean;
+  active: boolean;
+  lastSeenAt: Date;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface ServerRegistryDto {
+  tag: string;
+  name: string;
+  desc: string;
+  color: string;
+  image: string;
+  genre: string;
+  platform: string;
+  serverVersion: string;
+  modpackVersion: string;
+  earlyAccess: boolean;
+  active: boolean;
+  lastSeenAt: string;
+}
+
 // ── Stats History (Time Series) ──────────────────────────────────────────────
 
 export interface StatsHistoryDocument {

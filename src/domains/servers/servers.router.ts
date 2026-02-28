@@ -2,6 +2,8 @@ import { Router } from 'express';
 import { ServersRepository } from './servers.repository.js';
 import { ServersService } from './servers.service.js';
 import { ServersController } from './servers.controller.js';
+import { ServerRegistryRepository } from './server-registry.repository.js';
+import { ServerRegistryController } from './server-registry.controller.js';
 import { validate } from '../../middleware/validate.js';
 import { asyncHandler } from '../../shared/utils/async-handler.js';
 import { apiKeyAuth, optionalApiKeyAuth } from '../../middleware/auth/api-key.js';
@@ -22,6 +24,9 @@ const repo = new ServersRepository();
 const service = new ServersService(repo);
 const controller = new ServersController(service);
 
+const registryRepo = new ServerRegistryRepository();
+const registryController = new ServerRegistryController(registryRepo);
+
 export const serversRouter = Router();
 export { service as serversService };
 
@@ -32,6 +37,23 @@ serversRouter.get(
   optionalApiKeyAuth(),
   asyncHandler(controller.list),
 );
+
+// ── Registry routes (must be before /:server catch-all) ──────────────────
+
+serversRouter.get(
+  '/registry',
+  apiKeyAuth(),
+  asyncHandler(registryController.list),
+);
+
+serversRouter.get(
+  '/registry/:server',
+  apiKeyAuth(),
+  validate({ params: serverParamsSchema }),
+  asyncHandler(registryController.getOne),
+);
+
+// ─────────────────────────────────────────────────────────────────────────
 
 serversRouter.get(
   '/:server',
