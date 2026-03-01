@@ -134,17 +134,24 @@ export class PlayersService {
     // Append live snapshot if querying up to "now"
     if (to.getTime() >= Date.now() - 120_000) {
       const snapshot = playerStatsRecorder.getCurrentSnapshot();
-      const source = server ?? 'global';
-      const info = server ? snapshot.servers[server] : snapshot.global;
-      if (info && info.count > 0) {
-        docs.push({
-          timestamp: new Date(),
-          source,
-          playerCount: info.count,
-          peakPlayerCount: info.peakCount,
-          avgLatencyP95: 0,
-          avgLatencyAvg: 0,
-        });
+      const now = new Date();
+
+      if (server === 'all') {
+        // Append global + every server
+        if (snapshot.global.count > 0) {
+          docs.push({ timestamp: now, source: 'global', playerCount: snapshot.global.count, peakPlayerCount: snapshot.global.peakCount, avgLatencyP95: 0, avgLatencyAvg: 0 });
+        }
+        for (const [tag, info] of Object.entries(snapshot.servers)) {
+          if (info.count > 0) {
+            docs.push({ timestamp: now, source: tag, playerCount: info.count, peakPlayerCount: info.peakCount, avgLatencyP95: 0, avgLatencyAvg: 0 });
+          }
+        }
+      } else {
+        const source = server ?? 'global';
+        const info = server ? snapshot.servers[server] : snapshot.global;
+        if (info && info.count > 0) {
+          docs.push({ timestamp: now, source, playerCount: info.count, peakPlayerCount: info.peakCount, avgLatencyP95: 0, avgLatencyAvg: 0 });
+        }
       }
     }
 

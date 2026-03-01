@@ -116,23 +116,26 @@ export class PlayersRepository {
   // ── History ───────────────────────────────────────────────────────────
 
   async findPlayerHistory(from: Date, to: Date, server?: string): Promise<PlayerHistoryDocument[]> {
-    const source = server ?? 'global';
+    const isAll = server === 'all';
+    const sourceFilter = isAll ? {} : { source: server ?? 'global' };
     const bucket = pickBucket(to.getTime() - from.getTime());
 
     if (!bucket) {
       return this.history
-        .find({ source, timestamp: { $gte: from, $lte: to } })
+        .find({ ...sourceFilter, timestamp: { $gte: from, $lte: to } })
         .sort({ timestamp: 1 })
         .toArray();
     }
 
     return this.history
       .aggregate<PlayerHistoryDocument>([
-        { $match: { source, timestamp: { $gte: from, $lte: to } } },
+        { $match: { ...sourceFilter, timestamp: { $gte: from, $lte: to } } },
         { $sort: { timestamp: 1 } },
         {
           $group: {
-            _id: { $dateTrunc: { date: '$timestamp', unit: bucket.unit, binSize: bucket.binSize } },
+            _id: isAll
+              ? { time: { $dateTrunc: { date: '$timestamp', unit: bucket.unit, binSize: bucket.binSize } }, source: '$source' }
+              : { $dateTrunc: { date: '$timestamp', unit: bucket.unit, binSize: bucket.binSize } },
             source: { $first: '$source' },
             playerCount: { $max: '$playerCount' },
             peakPlayerCount: { $max: { $ifNull: ['$peakPlayerCount', '$playerCount'] } },
@@ -144,7 +147,7 @@ export class PlayersRepository {
         {
           $project: {
             _id: 0,
-            timestamp: '$_id',
+            timestamp: isAll ? '$_id.time' : '$_id',
             source: 1,
             playerCount: 1,
             peakPlayerCount: 1,
