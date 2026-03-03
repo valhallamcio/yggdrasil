@@ -5,6 +5,7 @@ import { eventBus } from '../../core/event-bus/index.js';
 import { UnauthorizedError, InternalError } from '../../shared/errors/index.js';
 import { kofiPayloadSchema } from './donations.schema.js';
 import type { DonationEvent } from './donations.types.js';
+import type { PatreonBody } from './donations.schema.js';
 import type { DonationsRepository } from './donations.repository.js';
 
 const KOFI_PUBLIC_TYPES = new Set(['Donation', 'Subscription']);
@@ -89,6 +90,7 @@ export class DonationsService {
       throw new InternalError('Patreon webhook secret not configured');
     }
 
+    // Patreon mandates HMAC-MD5 per their webhook spec — not a choice
     const expected = crypto
       .createHmac('md5', config.PATREON_WEBHOOK_SECRET)
       .update(rawBody)
@@ -106,43 +108,21 @@ export class DonationsService {
     }
   }
 
-  processPatreon(body: unknown, eventType: string): DonationEvent {
-    const payload = body as {
-      data: {
-        attributes: {
-          amount_cents?: number;
-          currency?: string;
-          note?: string;
-          patron_status?: string;
-          last_charge_date?: string;
-          last_charge_status?: string;
-          lifetime_support_cents?: number;
-          pledge_relationship_start?: string;
-          currently_entitled_amount_cents?: number;
-          is_follower?: boolean;
-        };
-      };
-      included?: Array<{
-        type: string;
-        attributes: { full_name?: string; name?: string; email?: string };
-      }>;
-    };
-
-    const attrs = payload.data?.attributes;
+  processPatreon(body: PatreonBody, eventType: string): DonationEvent {
+    const attrs = body.data?.attributes;
     const amountCents = attrs?.amount_cents ?? 0;
     const currency = attrs?.currency ?? 'USD';
     const note = attrs?.note;
 
-    const patronUser = payload.included?.find((inc) => inc.type === 'user');
-    const donorName =
-      patronUser?.attributes.full_name ?? patronUser?.attributes.name ?? 'Anonymous';
+    const patronUser = body.included?.find((inc) => inc.type === 'user');
+    const donorName = patronUser?.attributes.full_name ?? patronUser?.attributes.name ?? 'Anonymous';
 
     return {
       provider: 'patreon',
       donorName,
       amount: (amountCents / 100).toFixed(2),
       currency,
-      message: note,
+      message: note ?? undefined,
       email: patronUser?.attributes.email,
       isSubscription: true,
       rawEventType: eventType,

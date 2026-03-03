@@ -1,5 +1,11 @@
 import { z } from 'zod';
 
+/** Rejects paths containing directory traversal sequences (`..`). */
+const safePath = z
+  .string()
+  .min(1)
+  .refine((p) => !/(^|[\\/])\.\.($|[\\/])/.test(p), 'Path traversal is not allowed');
+
 export const serverParamsSchema = z.object({
   server: z.string().min(1).max(20),
 });
@@ -13,15 +19,15 @@ export const powerBodySchema = z.object({
 });
 
 export const fileListQuerySchema = z.object({
-  directory: z.string().default('/'),
+  directory: safePath.default('/'),
 });
 
 export const fileReadQuerySchema = z.object({
-  file: z.string().min(1),
+  file: safePath,
 });
 
 export const fileWriteQuerySchema = z.object({
-  file: z.string().min(1),
+  file: safePath,
 });
 
 export const fileWriteBodySchema = z.object({

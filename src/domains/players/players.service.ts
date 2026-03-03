@@ -40,12 +40,16 @@ function normalizeUuid(input: string): string {
   return `${hex.substring(0, 8)}-${hex.substring(8, 12)}-${hex.substring(12, 16)}-${hex.substring(16, 20)}-${hex.substring(20)}`;
 }
 
-function earliestDate(rec: Record<string, Date>): Date {
-  return new Date(Math.min(...Object.values(rec).map((d) => new Date(d).getTime())));
+function earliestDate(rec: Record<string, Date>): Date | null {
+  const values = Object.values(rec);
+  if (values.length === 0) return null;
+  return new Date(Math.min(...values.map((d) => new Date(d).getTime())));
 }
 
-function latestDate(rec: Record<string, Date>): Date {
-  return new Date(Math.max(...Object.values(rec).map((d) => new Date(d).getTime())));
+function latestDate(rec: Record<string, Date>): Date | null {
+  const values = Object.values(rec);
+  if (values.length === 0) return null;
+  return new Date(Math.max(...values.map((d) => new Date(d).getTime())));
 }
 
 function toPlayerDto(doc: WithId<PlayerDocument>, online: boolean, currentServer: string | null, latency: PlayerMetrics | null): PlayerDto {
@@ -54,8 +58,8 @@ function toPlayerDto(doc: WithId<PlayerDocument>, online: boolean, currentServer
     uuid: binaryToUuid(doc.uuid),
     nickname: doc.nickname ?? null,
     discordId: doc.discord_id ?? null,
-    firstSeen: earliestDate(doc.first_seen).toISOString(),
-    lastSeen: doc.leave_dates ? latestDate(doc.leave_dates).toISOString() : null,
+    firstSeen: earliestDate(doc.first_seen)?.toISOString() ?? null,
+    lastSeen: doc.leave_dates ? (latestDate(doc.leave_dates)?.toISOString() ?? null) : null,
     lastServer: doc.server,
     playtime: doc.playtime,
     online,
@@ -109,7 +113,7 @@ export class PlayersService {
       return docs.map((doc) => ({
         username: doc.username,
         uuid: binaryToUuid(doc.uuid),
-        value: earliestDate(doc.first_seen).getTime(),
+        value: earliestDate(doc.first_seen)?.getTime() ?? 0,
       }));
     }
 

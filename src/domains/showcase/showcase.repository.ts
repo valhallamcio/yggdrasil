@@ -15,7 +15,7 @@ export class ShowcaseRepository extends BaseRepository<ShowcaseCacheDocument> {
   async updateCache(posts: ShowcasePost[]): Promise<void> {
     const now = new Date();
     await this.collection.updateOne(
-      { _id: CACHE_DOC_ID } as any,
+      { _id: CACHE_DOC_ID },
       {
         $set: {
           posts,

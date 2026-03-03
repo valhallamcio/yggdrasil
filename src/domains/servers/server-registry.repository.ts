@@ -58,10 +58,10 @@ export class ServerRegistryRepository extends BaseRepository<ServerRegistryDocum
   }
 
   async findByTag(tag: string): Promise<ServerRegistryDocument | null> {
-    return this.findOne({ tag } as any);
+    return this.findOne({ tag });
   }
 
   async findAllEntries(): Promise<ServerRegistryDocument[]> {
-    return this.findMany({} as any);
+    return this.findMany({});
   }
 }

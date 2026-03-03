@@ -1,5 +1,6 @@
 import type { Request, Response } from 'express';
 import type { DonationsService } from './donations.service.js';
+import type { PatreonBody } from './donations.schema.js';
 import { logger } from '../../core/logger/index.js';
 
 export class DonationsController {
@@ -8,7 +9,8 @@ export class DonationsController {
   handleKofi = async (req: Request, res: Response): Promise<void> => {
     const rawData = (req.body as Record<string, unknown>)['data'];
     if (typeof rawData !== 'string') {
-      res.status(200).json({ received: true });
+      logger.warn({ body: req.body }, 'Ko-fi webhook received with non-string data field');
+      res.status(400).json({ error: { code: 'BAD_REQUEST', message: 'Expected data field to be a string' } });
       return;
     }
 
@@ -19,7 +21,11 @@ export class DonationsController {
     );
 
     await this.service.save(event);
-    this.service.notifyDiscord(event);
+    try {
+      this.service.notifyDiscord(event);
+    } catch (err) {
+      logger.error({ err, provider: event.provider }, 'Failed to dispatch donation notification');
+    }
     res.status(200).json({ received: true });
   };
 
@@ -35,14 +41,18 @@ export class DonationsController {
     const rawBody = req.rawBody ?? Buffer.alloc(0);
     this.service.verifyPatreonSignature(rawBody, signature);
 
-    const event = this.service.processPatreon(req.body as unknown, eventType ?? 'unknown');
+    const event = this.service.processPatreon(req.body as PatreonBody, eventType ?? 'unknown');
     logger.info(
       { provider: 'patreon', donor: event.donorName, amount: event.amount, type: event.rawEventType },
       'Patreon webhook processed'
     );
 
     await this.service.save(event);
-    this.service.notifyDiscord(event);
+    try {
+      this.service.notifyDiscord(event);
+    } catch (err) {
+      logger.error({ err, provider: event.provider }, 'Failed to dispatch donation notification');
+    }
     res.status(200).json({ received: true });
   };
 }

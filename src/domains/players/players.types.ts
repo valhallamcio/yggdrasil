@@ -38,7 +38,7 @@ export interface PlayerDto {
   uuid: string;
   nickname: string | null;
   discordId: string | null;
-  firstSeen: string;
+  firstSeen: string | null;
   lastSeen: string | null;
   lastServer: string;
   playtime: Record<string, number>;

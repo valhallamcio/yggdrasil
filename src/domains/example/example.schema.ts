@@ -12,8 +12,8 @@ export const exampleParamsSchema = z.object({
 });
 
 export const exampleQuerySchema = z.object({
-  limit: z.string().regex(/^\d+$/).transform(Number).default('20'),
-  skip: z.string().regex(/^\d+$/).transform(Number).default('0'),
+  limit: z.string().regex(/^\d+$/).transform(Number).pipe(z.number().max(100)).default('20'),
+  skip: z.string().regex(/^\d+$/).transform(Number).pipe(z.number().max(10000)).default('0'),
 });
 
 export type CreateExampleDto = z.infer<typeof createExampleSchema>;

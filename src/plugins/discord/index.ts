@@ -8,12 +8,32 @@ import { logger } from '../../core/logger/index.js';
 // discord.js is an optional dependency — install with: npm install discord.js
 // It is only imported when PLUGIN_DISCORD=true
 
+const WEBHOOK_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+
+/** Minimal interface for what we use from a discord.js Webhook. */
+interface DiscordWebhook {
+  token: string | null;
+  send(message: { content: string; username?: string }): Promise<unknown>;
+}
+
+/** Minimal interface for what we use from a discord.js TextChannel. */
+interface DiscordTextChannel {
+  isTextBased(): true;
+  send(content: string): Promise<unknown>;
+  fetchWebhooks(): Promise<{ find(fn: (wh: DiscordWebhook) => boolean): DiscordWebhook | undefined }>;
+  createWebhook(opts: { name: string; avatar?: string }): Promise<DiscordWebhook>;
+}
+
+interface CachedWebhook {
+  webhook: DiscordWebhook;
+  cachedAt: number;
+}
+
 export class DiscordPlugin implements Plugin {
   readonly name = 'discord';
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private client: any;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private readonly webhookCache = new Map<string, any>();
+  private readonly webhookCache = new Map<string, CachedWebhook>();
   private readonly crashLoopServers = new Set<string>();
 
   async init(_app: Express, _server: HttpServer): Promise<void> {
@@ -24,6 +44,7 @@ export class DiscordPlugin implements Plugin {
     // Dynamic import keeps discord.js out of the startup path when plugin is disabled
     const { Client, GatewayIntentBits } = await import('discord.js');
 
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call
     this.client = new Client({
       intents: [
         GatewayIntentBits.Guilds,
@@ -34,9 +55,9 @@ export class DiscordPlugin implements Plugin {
 
     // Discord events → internal events
     // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-    this.client.on('interactionCreate', async (interaction: unknown) => {
-      // Handle slash commands here — dispatch to handlers in commands/
-      logger.debug({ plugin: this.name }, 'Interaction received');
+    this.client.on('interactionCreate', () => {
+      // TODO: dispatch to slash command handlers in commands/
+      logger.warn({ plugin: this.name }, 'Interaction received but no handler is registered');
     });
 
     // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
@@ -98,9 +119,10 @@ export class DiscordPlugin implements Plugin {
     if (!this.client) return;
     try {
       // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-      const channel = await this.client.channels.fetch(channelId);
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-      await channel?.send(content);
+      const channel = await this.client.channels.fetch(channelId) as DiscordTextChannel | null;
+      if (channel?.isTextBased()) {
+        await channel.send(content);
+      }
     } catch (err) {
       logger.error({ err, channelId }, 'Failed to send Discord message');
     }
@@ -114,44 +136,44 @@ export class DiscordPlugin implements Plugin {
     try {
       const webhook = await this.getWebhook(channelId);
       if (!webhook) return;
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
       await webhook.send(message);
     } catch (err) {
       logger.error({ err, channelId }, 'Failed to send Discord webhook message');
     }
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private async getWebhook(channelId: string): Promise<any> {
+  private async getWebhook(channelId: string): Promise<DiscordWebhook | null> {
     const cached = this.webhookCache.get(channelId);
-    if (cached) return cached;
+    if (cached && Date.now() - cached.cachedAt < WEBHOOK_CACHE_TTL_MS) {
+      return cached.webhook;
+    }
+    // Evict stale entry
+    if (cached) this.webhookCache.delete(channelId);
 
     try {
       // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-      const channel = await this.client.channels.fetch(channelId);
-      if (!channel) {
-        logger.error({ channelId }, 'Discord channel not found');
+      const channel = await this.client.channels.fetch(channelId) as DiscordTextChannel | null;
+      if (!channel?.isTextBased()) {
+        logger.error({ channelId }, 'Discord channel not found or not text-based');
         return null;
       }
 
-      // Look for an existing webhook we can use
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
       const webhooks = await channel.fetchWebhooks();
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-explicit-any
-      let webhook = webhooks.find((wh: any) => wh.token);
+      let webhook = webhooks.find((wh) => wh.token !== null) ?? null;
 
       if (!webhook) {
         logger.info({ channelId }, 'Creating webhook for Discord channel');
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
         webhook = await channel.createWebhook({
-          name: this.client.user?.username ?? 'Yggdrasil',
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+          name: (this.client.user?.username as string | undefined) ?? 'Yggdrasil',
           // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-          avatar: this.client.user?.displayAvatarURL(),
+          avatar: this.client.user?.displayAvatarURL() as string | undefined,
         });
         logger.info({ channelId }, 'Webhook created for Discord channel');
       }
 
-      this.webhookCache.set(channelId, webhook);
+      this.webhookCache.set(channelId, { webhook, cachedAt: Date.now() });
       return webhook;
     } catch (err) {
       logger.error({ err, channelId }, 'Failed to get or create Discord webhook');
