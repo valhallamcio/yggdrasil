@@ -33,9 +33,9 @@ class SessionRecorder {
     logger.info('Session recorder stopped');
   }
 
-  private onJoined = (payload: { username: string; server: string }): void => {
+  private onJoined = (payload: { username: string; server: string; ip: string }): void => {
     if (!this.listening) return;
-    void this.openSession(payload.username, payload.server);
+    void this.openSession(payload.username, payload.server, payload.ip);
   };
 
   private onLeft = (payload: { username: string; server: string }): void => {
@@ -43,16 +43,17 @@ class SessionRecorder {
     void this.closeSession(payload.username, payload.server, 'left');
   };
 
-  private onServerChanged = (payload: { username: string; previousServer: string; currentServer: string }): void => {
+  private onServerChanged = (payload: { username: string; ip: string; previousServer: string; currentServer: string }): void => {
     if (!this.listening) return;
     void this.handleServerChange(payload);
   };
 
-  private async openSession(username: string, server: string): Promise<void> {
+  private async openSession(username: string, server: string, ip: string): Promise<void> {
     try {
       await this.collection!.insertOne({
         username,
         server,
+        ip: ip || null,
         joinedAt: new Date(),
         leftAt: null,
         duration: null,
@@ -83,9 +84,9 @@ class SessionRecorder {
     }
   }
 
-  private async handleServerChange(payload: { username: string; previousServer: string; currentServer: string }): Promise<void> {
+  private async handleServerChange(payload: { username: string; ip: string; previousServer: string; currentServer: string }): Promise<void> {
     await this.closeSession(payload.username, payload.previousServer, 'server_change');
-    await this.openSession(payload.username, payload.currentServer);
+    await this.openSession(payload.username, payload.currentServer, payload.ip);
   }
 
   private async cleanupOrphans(): Promise<void> {

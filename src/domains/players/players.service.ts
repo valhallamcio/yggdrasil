@@ -3,6 +3,7 @@ import type { PlayersRepository } from './players.repository.js';
 import { PterodactylClient } from '../servers/pterodactyl.client.js';
 import { ServersRepository } from '../servers/servers.repository.js';
 import { metricsCollector } from './metrics-collector.js';
+import { bifrostStateManager } from '../../plugins/bifrost/state-manager.js';
 import { binaryToUuid, uuidToBinary } from '../../shared/utils/uuid.js';
 import { AppError, NotFoundError } from '../../shared/errors/index.js';
 import { logger } from '../../core/logger/index.js';
@@ -13,11 +14,16 @@ import type {
   PlayerDto,
   OnlinePlayerDto,
   PlayerPositionDto,
-  PlayerMetrics,
   LeaderboardEntryDto,
   PlayerHistoryDocument,
   PlayerAnalyticsDto,
 } from './players.types.js';
+
+function getActiveSource() {
+  return bifrostStateManager.connected || bifrostStateManager.count > 0
+    ? bifrostStateManager
+    : metricsCollector;
+}
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let nbtLib: any;
@@ -52,7 +58,7 @@ function latestDate(rec: Record<string, Date>): Date | null {
   return new Date(Math.max(...values.map((d) => new Date(d).getTime())));
 }
 
-function toPlayerDto(doc: WithId<PlayerDocument>, online: boolean, currentServer: string | null, latency: PlayerMetrics | null): PlayerDto {
+function toPlayerDto(doc: WithId<PlayerDocument>, online: boolean, currentServer: string | null, latency: { ping: number } | null): PlayerDto {
   return {
     username: doc.username,
     uuid: binaryToUuid(doc.uuid),
@@ -77,22 +83,15 @@ export class PlayersService {
   // ── Online Players ──────────────────────────────────────────────────
 
   getOnlinePlayers(): Record<string, OnlinePlayerDto[]> {
-    return metricsCollector.getOnlinePlayers();
+    return getActiveSource().getOnlinePlayers();
   }
 
   // ── Individual Player ─────────────────────────────────────────────
 
   async getPlayer(nick: string): Promise<PlayerDto> {
     const doc = await this.requirePlayer(nick);
-    const info = metricsCollector.getPlayerInfo(doc.username);
-    const online = !!info;
-
-    return toPlayerDto(
-      doc,
-      online,
-      info?.server ?? null,
-      info ? { latencyP95: info.latency.latencyP95, latencyAvg: info.latency.latencyAvg, latencyMin: info.latency.latencyMin, latencyMax: info.latency.latencyMax } : null,
-    );
+    const info = getActiveSource().getPlayerInfo(doc.username);
+    return toPlayerDto(doc, !!info, info?.server ?? null, info ? { ping: info.ping } : null);
   }
 
   // ── Search ────────────────────────────────────────────────────────
@@ -100,8 +99,8 @@ export class PlayersService {
   async searchPlayers(query: string, limit: number): Promise<PlayerDto[]> {
     const docs = await this.repo.searchByUsername(query, limit);
     return docs.map((doc) => {
-      const info = metricsCollector.getPlayerInfo(doc.username);
-      return toPlayerDto(doc, !!info, info?.server ?? null, info ? info.latency : null);
+      const info = getActiveSource().getPlayerInfo(doc.username);
+      return toPlayerDto(doc, !!info, info?.server ?? null, info ? { ping: info.ping } : null);
     });
   }
 
@@ -143,18 +142,18 @@ export class PlayersService {
       if (server === 'all') {
         // Append global + every server
         if (snapshot.global.count > 0) {
-          docs.push({ timestamp: now, source: 'global', playerCount: snapshot.global.count, peakPlayerCount: snapshot.global.peakCount, avgLatencyP95: 0, avgLatencyAvg: 0 });
+          docs.push({ timestamp: now, source: 'global', playerCount: snapshot.global.count, peakPlayerCount: snapshot.global.peakCount, avgPing: 0 });
         }
         for (const [tag, info] of Object.entries(snapshot.servers)) {
           if (info.count > 0) {
-            docs.push({ timestamp: now, source: tag, playerCount: info.count, peakPlayerCount: info.peakCount, avgLatencyP95: 0, avgLatencyAvg: 0 });
+            docs.push({ timestamp: now, source: tag, playerCount: info.count, peakPlayerCount: info.peakCount, avgPing: 0 });
           }
         }
       } else {
         const source = server ?? 'global';
         const info = server ? snapshot.servers[server] : snapshot.global;
         if (info && info.count > 0) {
-          docs.push({ timestamp: now, source, playerCount: info.count, peakPlayerCount: info.peakCount, avgLatencyP95: 0, avgLatencyAvg: 0 });
+          docs.push({ timestamp: now, source, playerCount: info.count, peakPlayerCount: info.peakCount, avgPing: 0 });
         }
       }
     }
@@ -183,8 +182,8 @@ export class PlayersService {
         this.repo.getRetentionCohorts(8, server),
       ]);
 
-    // Live data from metrics collector
-    const onlinePlayers = metricsCollector.getOnlinePlayers();
+    // Live data from active player source
+    const onlinePlayers = getActiveSource().getOnlinePlayers();
     const serverCounts: Record<string, number> = {};
     let totalOnline = 0;
     for (const [tag, players] of Object.entries(onlinePlayers)) {

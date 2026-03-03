@@ -1,6 +1,6 @@
 # Yggdrasil
 
-Central REST API hub for the ValhallaMC Minecraft network. Aggregates data from MongoDB, Pterodactyl game panel, and Velocity proxy metrics into a unified API with real-time WebSocket streaming and Discord integration.
+Central REST API hub for the ValhallaMC Minecraft network. Aggregates data from MongoDB, Pterodactyl game panel, and Velocity proxy into a unified API with real-time WebSocket streaming and Discord integration. Player presence is tracked via the Bifrost proxy (WebSocket push) with optional fallback to Velocity Prometheus scraping.
 
 ## Tech Stack
 
@@ -19,7 +19,8 @@ Central REST API hub for the ValhallaMC Minecraft network. Aggregates data from 
 - Node.js 20+
 - MongoDB instance
 - Pterodactyl panel (for server management features)
-- Velocity proxy with Prometheus metrics (for player tracking)
+- Bifrost proxy (for real-time player tracking via WebSocket)
+- Velocity Prometheus metrics endpoint (optional fallback for player tracking)
 
 ### Installation
 
@@ -110,7 +111,8 @@ src/
 │   └── not-found.ts           # 404 handler
 ├── plugins/
 │   ├── discord/               # Discord bot integration
-│   └── websocket/             # WebSocket server
+│   ├── websocket/             # WebSocket server (dashboard + Bifrost endpoints)
+│   └── bifrost/               # Bifrost proxy state manager (player presence)
 ├── repositories/
 │   └── base.repository.ts     # Generic CRUD base class
 ├── router/
@@ -195,11 +197,17 @@ Requires: `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`, `DISCORD_GUILD_ID`, and relevant
 
 ### WebSocket (`PLUGIN_WEBSOCKET`)
 
-Attaches a WebSocket server to the HTTP server. Clients authenticate via `?token=` query parameter (API key).
+Attaches two WebSocket servers to the HTTP server, both authenticating via `?token=` query parameter (API key).
 
-**Broadcasted events:** `server.stats`, `server.state.changed`, `server.crashed`, `server.recovered`, `player.joined`, `player.left`, `player.server.changed`, `player.list.updated`
+**Dashboard clients** connect to `ws://<host>/`. On connect they immediately receive a `proxy.state` snapshot; a full snapshot is also broadcast every 30 seconds.
+
+**Bifrost proxy** connects to `ws://<host>/bifrost/`. It pushes player events to Yggdrasil, which maintains authoritative in-memory player state via `BifrostStateManager` and reconciles on `player.list.updated`. On disconnect, synthetic `player.left` events are emitted for all tracked players.
+
+**Broadcasted events (dashboard):** `proxy.state`, `server.stats`, `server.state.changed`, `server.crashed`, `server.recovered`, `server.crash-loop.started`, `server.crash-loop.ended`, `player.joined`, `player.left`, `player.server.changed`, `player.list.updated`, `player.chat`
 
 **Client commands:** `console.subscribe` / `console.unsubscribe` for per-server console streaming.
+
+**Inbound Bifrost message types:** `player.joined`, `player.left`, `player.server.changed`, `player.list.updated`, `player.message`, `player.position`, `player.inventory`
 
 ## Scheduler Jobs
 

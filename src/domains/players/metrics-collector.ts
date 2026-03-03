@@ -1,15 +1,15 @@
 import { config } from '../../config/index.js';
 import { logger } from '../../core/logger/index.js';
 import { eventBus } from '../../core/event-bus/index.js';
-import { parsePlayerMetrics, type PlayerLatency } from '../../shared/utils/prometheus.js';
-import type { OnlinePlayerDto, PlayerMetrics } from './players.types.js';
+import { parsePlayerMetrics } from '../../shared/utils/prometheus.js';
+import type { OnlinePlayerDto } from './players.types.js';
 
 const POLL_INTERVAL_MS = 5_000;
 
 interface CachedPlayer {
   username: string;
   server: string;
-  latency: PlayerLatency;
+  ping: number;
 }
 
 class MetricsCollector {
@@ -47,14 +47,7 @@ class MetricsCollector {
         list = [];
         grouped[player.server] = list;
       }
-      list.push({
-        username: player.username,
-        server: player.server,
-        latencyP95: player.latency.latencyP95,
-        latencyAvg: player.latency.latencyAvg,
-        latencyMin: player.latency.latencyMin,
-        latencyMax: player.latency.latencyMax,
-      });
+      list.push({ username: player.username, server: player.server, ping: player.ping });
     }
     return grouped;
   }
@@ -63,10 +56,7 @@ class MetricsCollector {
     return Array.from(this.cache.values()).map((p) => ({
       username: p.username,
       server: p.server,
-      latencyP95: p.latency.latencyP95,
-      latencyAvg: p.latency.latencyAvg,
-      latencyMin: p.latency.latencyMin,
-      latencyMax: p.latency.latencyMax,
+      ping: p.ping,
     }));
   }
 
@@ -74,10 +64,14 @@ class MetricsCollector {
     return this.cache.has(username);
   }
 
-  getPlayerInfo(username: string): { server: string; latency: PlayerMetrics } | undefined {
+  getPlayerInfo(username: string): { server: string; ping: number } | undefined {
     const player = this.cache.get(username);
     if (!player) return undefined;
-    return { server: player.server, latency: player.latency };
+    return { server: player.server, ping: player.ping };
+  }
+
+  get count(): number {
+    return this.cache.size;
   }
 
   private async poll(): Promise<void> {
@@ -95,12 +89,14 @@ class MetricsCollector {
       const text = await res.text();
       const metrics = parsePlayerMetrics(text);
 
-      // Build new player map: username → { server, latency }
+      // Build new player map: username → { server, ping }
       const newPlayers = new Map<string, CachedPlayer>();
       for (const [server, players] of metrics.players) {
         for (const username of players) {
-          const latency = metrics.latency.get(username) ?? { latencyP95: 0, latencyAvg: 0, latencyMin: 0, latencyMax: 0 };
-          newPlayers.set(username, { username, server, latency });
+          const latency = metrics.latency.get(username);
+          // Use P95 as the representative ping value
+          const ping = latency?.latencyP95 ?? 0;
+          newPlayers.set(username, { username, server, ping });
         }
       }
 
@@ -108,35 +104,29 @@ class MetricsCollector {
       for (const [username, newInfo] of newPlayers) {
         const oldInfo = this.cache.get(username);
         if (!oldInfo) {
-          eventBus.emit('player.joined', { username, server: newInfo.server, latencyP95: newInfo.latency.latencyP95 });
+          eventBus.emit('player.joined', { username, uuid: '', ip: '', server: newInfo.server, ping: newInfo.ping });
         } else if (oldInfo.server !== newInfo.server) {
-          eventBus.emit('player.server.changed', { username, previousServer: oldInfo.server, currentServer: newInfo.server });
+          eventBus.emit('player.server.changed', { username, uuid: '', ip: '', previousServer: oldInfo.server, currentServer: newInfo.server });
         }
       }
 
       for (const [username, oldInfo] of this.cache) {
         if (!newPlayers.has(username)) {
-          eventBus.emit('player.left', { username, server: oldInfo.server });
+          eventBus.emit('player.left', { username, uuid: '', ip: '', server: oldInfo.server });
         }
       }
 
       this.cache = newPlayers;
 
       // Emit full list update
-      const servers: Record<string, Array<{ username: string; latencyP95: number; latencyAvg: number; latencyMin: number; latencyMax: number }>> = {};
+      const servers: Record<string, Array<{ username: string; ping: number }>> = {};
       for (const [username, info] of newPlayers) {
         let list = servers[info.server];
         if (!list) {
           list = [];
           servers[info.server] = list;
         }
-        list.push({
-          username,
-          latencyP95: info.latency.latencyP95,
-          latencyAvg: info.latency.latencyAvg,
-          latencyMin: info.latency.latencyMin,
-          latencyMax: info.latency.latencyMax,
-        });
+        list.push({ username, ping: info.ping });
       }
 
       eventBus.emit('player.list.updated', { servers, count: newPlayers.size });

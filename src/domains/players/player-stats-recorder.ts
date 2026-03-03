@@ -7,7 +7,7 @@ import type { PlayerHistoryDocument } from './players.types.js';
 const THROTTLE_MS = 60_000;
 
 type PlayerPayload = {
-  servers: Record<string, Array<{ username: string; latencyP95: number; latencyAvg: number; latencyMin: number; latencyMax: number }>>;
+  servers: Record<string, Array<{ username: string; ping: number }>>;
   count: number;
 };
 
@@ -93,14 +93,12 @@ class PlayerStatsRecorder {
       const docs: PlayerHistoryDocument[] = [];
 
       // Global document
-      let totalP95 = 0;
-      let totalAvg = 0;
+      let totalPing = 0;
       let playerCount = 0;
 
       for (const players of Object.values(payload.servers)) {
         for (const p of players) {
-          totalP95 += p.latencyP95;
-          totalAvg += p.latencyAvg;
+          totalPing += p.ping;
           playerCount++;
         }
       }
@@ -110,17 +108,14 @@ class PlayerStatsRecorder {
         source: 'global',
         playerCount: payload.count,
         peakPlayerCount: this.peakGlobal,
-        avgLatencyP95: playerCount > 0 ? Math.round((totalP95 / playerCount) * 100) / 100 : 0,
-        avgLatencyAvg: playerCount > 0 ? Math.round((totalAvg / playerCount) * 100) / 100 : 0,
+        avgPing: playerCount > 0 ? Math.round((totalPing / playerCount) * 100) / 100 : 0,
       });
 
       // Per-server documents
       for (const [server, players] of Object.entries(payload.servers)) {
-        let serverP95 = 0;
-        let serverAvg = 0;
+        let serverPing = 0;
         for (const p of players) {
-          serverP95 += p.latencyP95;
-          serverAvg += p.latencyAvg;
+          serverPing += p.ping;
         }
         const count = players.length;
         docs.push({
@@ -128,8 +123,7 @@ class PlayerStatsRecorder {
           source: server,
           playerCount: count,
           peakPlayerCount: this.peakServers[server] ?? count,
-          avgLatencyP95: count > 0 ? Math.round((serverP95 / count) * 100) / 100 : 0,
-          avgLatencyAvg: count > 0 ? Math.round((serverAvg / count) * 100) / 100 : 0,
+          avgPing: count > 0 ? Math.round((serverPing / count) * 100) / 100 : 0,
         });
       }
 

@@ -13,24 +13,12 @@ export interface PlayerDocument {
   playtime: Record<string, number>;
 }
 
-// ── Metrics (in-memory from Prometheus) ─────────────────────────────────────
-
-export interface PlayerMetrics {
-  latencyP95: number;
-  latencyAvg: number;
-  latencyMin: number;
-  latencyMax: number;
-}
-
 // ── API DTOs ────────────────────────────────────────────────────────────────
 
 export interface OnlinePlayerDto {
   username: string;
   server: string;
-  latencyP95: number;
-  latencyAvg: number;
-  latencyMin: number;
-  latencyMax: number;
+  ping: number;
 }
 
 export interface PlayerDto {
@@ -44,7 +32,7 @@ export interface PlayerDto {
   playtime: Record<string, number>;
   online: boolean;
   currentServer: string | null;
-  latency: PlayerMetrics | null;
+  latency: { ping: number } | null;
 }
 
 export interface PlayerPositionDto {
@@ -68,6 +56,7 @@ export interface LeaderboardEntryDto {
 export interface PlayerSessionDocument {
   username: string;
   server: string;
+  ip: string | null;
   joinedAt: Date;
   leftAt: Date | null;
   duration: number | null;
@@ -81,8 +70,7 @@ export interface PlayerHistoryDocument {
   source: string;
   playerCount: number;
   peakPlayerCount: number;
-  avgLatencyP95: number;
-  avgLatencyAvg: number;
+  avgPing: number;
 }
 
 // ── Peak Tracking ───────────────────────────────────────────────────────────

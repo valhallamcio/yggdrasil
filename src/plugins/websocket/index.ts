@@ -5,25 +5,31 @@ import type WebSocket from 'ws';
 import { logger } from '../../core/logger/index.js';
 import { eventBus } from '../../core/event-bus/index.js';
 import { config } from '../../config/index.js';
+import { bifrostStateManager } from '../bifrost/state-manager.js';
+
+const SNAPSHOT_INTERVAL_MS = 30_000;
 
 export class WebSocketPlugin implements Plugin {
   readonly name = 'websocket';
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private wss: any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private bifrostWss: any;
   private readonly consoleSubscriptions = new Map<string, Set<WebSocket>>();
+  private snapshotInterval: ReturnType<typeof setInterval> | null = null;
 
   async init(_app: Express, server: HttpServer): Promise<void> {
     // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
     const { WebSocketServer } = await import('ws');
 
+    // ── Dashboard WS server (path: /) ───────────────────────────────────────
     // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-assignment
-    this.wss = new WebSocketServer({ server });
+    this.wss = new WebSocketServer({ noServer: true });
 
     // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
     this.wss.on('connection', (ws: WebSocket, req: import('http').IncomingMessage) => {
       const wsLogger = logger.child({ plugin: 'websocket', ip: req.socket.remoteAddress });
 
-      // Validate API key from query string (?token=...)
       const url = new URL(req.url ?? '', `http://${req.headers.host}`);
       const token = url.searchParams.get('token');
 
@@ -32,18 +38,22 @@ export class WebSocketPlugin implements Plugin {
         ws.send(JSON.stringify({ error: 'Unauthorized' }));
         // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
         ws.close(1008, 'Unauthorized');
-        wsLogger.warn('Client rejected: invalid or missing token');
+        wsLogger.warn('Dashboard client rejected: invalid or missing token');
         return;
       }
 
-      wsLogger.info('Client connected');
+      wsLogger.info('Dashboard client connected');
+
+      // Send current proxy state immediately so the client doesn't have to wait
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+      ws.send(JSON.stringify({ type: 'proxy.state', payload: bifrostStateManager.getSnapshot() }));
 
       // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
       ws.on('message', (raw: Buffer) => {
         try {
           const msg = JSON.parse(raw.toString()) as { type: string; payload?: { server?: string } };
           wsLogger.debug({ msgType: msg.type }, 'Message received');
-          this.handleClientMessage(ws, msg);
+          this.handleDashboardMessage(ws, msg);
         } catch {
           // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
           ws.send(JSON.stringify({ error: 'Invalid JSON' }));
@@ -52,7 +62,7 @@ export class WebSocketPlugin implements Plugin {
 
       // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
       ws.on('close', () => {
-        wsLogger.info('Client disconnected');
+        wsLogger.info('Dashboard client disconnected');
         this.removeClientFromAllSubscriptions(ws);
       });
 
@@ -60,7 +70,80 @@ export class WebSocketPlugin implements Plugin {
       ws.on('error', (err: unknown) => wsLogger.error({ err }, 'WebSocket error'));
     });
 
-    // ── Status channel (broadcast to all) ───────────────────────────────────
+    // ── Bifrost WS server (path: /bifrost/) ─────────────────────────────────
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-assignment
+    this.bifrostWss = new WebSocketServer({ noServer: true });
+
+    // Route HTTP upgrade requests to the correct WSS by pathname.
+    // Using noServer on both instances avoids ws's built-in path check calling
+    // abortHandshake(400) on requests destined for the other server.
+    server.on('upgrade', (req, socket, head) => {
+      const pathname = req.url?.split('?')[0] ?? '/';
+      if (pathname === '/bifrost/') {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+        this.bifrostWss.handleUpgrade(req, socket, head, (ws: WebSocket) => {
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+          this.bifrostWss.emit('connection', ws, req);
+        });
+      } else if (pathname === '/') {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+        this.wss.handleUpgrade(req, socket, head, (ws: WebSocket) => {
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+          this.wss.emit('connection', ws, req);
+        });
+      } else {
+        socket.destroy();
+      }
+    });
+
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+    this.bifrostWss.on('connection', (ws: WebSocket, req: import('http').IncomingMessage) => {
+      const wsLogger = logger.child({ plugin: 'websocket/bifrost', ip: req.socket.remoteAddress });
+
+      const url = new URL(req.url ?? '', `http://${req.headers.host}`);
+      const token = url.searchParams.get('token');
+
+      if (!token || !config.API_KEYS.includes(token)) {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+        ws.send(JSON.stringify({ error: 'Unauthorized' }));
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+        ws.close(1008, 'Unauthorized');
+        wsLogger.warn('Bifrost client rejected: invalid or missing token');
+        return;
+      }
+
+      wsLogger.info('Bifrost proxy connected');
+      bifrostStateManager.setConnected(ws);
+
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+      ws.on('message', (raw: Buffer) => {
+        try {
+          const msg = JSON.parse(raw.toString()) as { type: string; payload?: Record<string, unknown> };
+          wsLogger.debug({ msgType: msg.type }, 'Bifrost message received');
+          bifrostStateManager.handleMessage(msg.type, msg.payload ?? {});
+        } catch {
+          wsLogger.warn('Invalid JSON from Bifrost');
+        }
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+      ws.on('close', () => {
+        wsLogger.warn('Bifrost proxy disconnected');
+        bifrostStateManager.onDisconnect(ws);
+        // Broadcast updated (disconnected) state to dashboard clients
+        this.broadcast({ type: 'proxy.state', payload: bifrostStateManager.getSnapshot() });
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+      ws.on('error', (err: unknown) => wsLogger.error({ err }, 'Bifrost WebSocket error'));
+    });
+
+    // ── Periodic full-state snapshot ─────────────────────────────────────────
+    this.snapshotInterval = setInterval(() => {
+      this.broadcast({ type: 'proxy.state', payload: bifrostStateManager.getSnapshot() });
+    }, SNAPSHOT_INTERVAL_MS);
+
+    // ── Server events (broadcast to all dashboard clients) ───────────────────
     eventBus.on('server.stats', (payload) => {
       this.broadcast({ type: 'server.stats', payload });
     });
@@ -85,7 +168,7 @@ export class WebSocketPlugin implements Plugin {
       this.broadcast({ type: 'server.crash-loop.ended', payload });
     });
 
-    // ── Player channel (broadcast to all) ──────────────────────────────────
+    // ── Player events (broadcast to all dashboard clients) ───────────────────
     eventBus.on('player.joined', (payload) => {
       this.broadcast({ type: 'player.joined', payload });
     });
@@ -102,7 +185,11 @@ export class WebSocketPlugin implements Plugin {
       this.broadcast({ type: 'player.list.updated', payload });
     });
 
-    // ── Console channel (per-server subscriptions) ──────────────────────────
+    eventBus.on('player.chat', (payload) => {
+      this.broadcast({ type: 'player.chat', payload });
+    });
+
+    // ── Console channel (per-server subscriptions) ────────────────────────────
     eventBus.on('server.console.output', ({ server, line }) => {
       const subscribers = this.consoleSubscriptions.get(server);
       if (!subscribers || subscribers.size === 0) return;
@@ -117,8 +204,7 @@ export class WebSocketPlugin implements Plugin {
   }
 
   /**
-   * Broadcasts a message to all connected WebSocket clients.
-   * Can be called from services or event bus handlers.
+   * Broadcasts a message to all connected dashboard WebSocket clients.
    */
   broadcast(message: unknown): void {
     const data = JSON.stringify(message);
@@ -130,18 +216,26 @@ export class WebSocketPlugin implements Plugin {
   }
 
   async shutdown(): Promise<void> {
+    if (this.snapshotInterval) {
+      clearInterval(this.snapshotInterval);
+      this.snapshotInterval = null;
+    }
     this.consoleSubscriptions.clear();
-    if (!this.wss) return;
-    await new Promise<void>((resolve, reject) => {
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-      this.wss.close((err: Error | undefined) => (err ? reject(err) : resolve()));
-    });
+
+    const closeWss = (wss: unknown): Promise<void> =>
+      new Promise<void>((resolve, reject) => {
+        if (!wss) return resolve();
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-explicit-any
+        (wss as any).close((err: Error | undefined) => (err ? reject(err) : resolve()));
+      });
+
+    await Promise.all([closeWss(this.wss), closeWss(this.bifrostWss)]);
     logger.info({ plugin: this.name }, 'WebSocket server closed');
   }
 
-  // ── Console subscription management ─────────────────────────────────────
+  // ── Dashboard message handling ───────────────────────────────────────────
 
-  private handleClientMessage(
+  private handleDashboardMessage(
     ws: WebSocket,
     msg: { type: string; payload?: { server?: string } },
   ): void {
