@@ -1,6 +1,6 @@
 # Yggdrasil
 
-Central REST API hub for the ValhallaMC Minecraft network. Aggregates data from MongoDB, Pterodactyl game panel, and Velocity proxy into a unified API with real-time WebSocket streaming and Discord integration. Player presence is tracked via the Bifrost proxy (WebSocket push) with optional fallback to Velocity Prometheus scraping.
+Central REST API hub for the ValhallaMC Minecraft network. Aggregates data from MongoDB and Pterodactyl game panel into a unified API with real-time WebSocket streaming and Discord integration. Player presence is tracked via the Bifrost proxy (WebSocket push).
 
 ## Tech Stack
 
@@ -20,7 +20,7 @@ Central REST API hub for the ValhallaMC Minecraft network. Aggregates data from 
 - MongoDB instance
 - Pterodactyl panel (for server management features)
 - Bifrost proxy (for real-time player tracking via WebSocket)
-- Velocity Prometheus metrics endpoint (optional fallback for player tracking)
+- Velocity Prometheus metrics endpoint (optional, legacy — requires `VELOCITY_METRICS_URL` env var)
 
 ### Installation
 
@@ -48,7 +48,7 @@ Create a `.env` file in the project root. Required variables are marked with **b
 | `RATE_LIMIT_MAX` | `100` | Max requests per window |
 | `PTERODACTYL_URL` | — | Pterodactyl panel base URL |
 | `PTERODACTYL_API_KEY` | — | Pterodactyl client API key |
-| `VELOCITY_METRICS_URL` | — | Velocity Prometheus metrics endpoint |
+| `VELOCITY_METRICS_URL` | — | Velocity Prometheus metrics endpoint (legacy, optional) |
 | `PLUGIN_DISCORD` | `false` | Enable Discord plugin |
 | `PLUGIN_WEBSOCKET` | `false` | Enable WebSocket plugin |
 | `DISCORD_TOKEN` | — | Discord bot token |

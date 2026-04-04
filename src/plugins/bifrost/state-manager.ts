@@ -208,11 +208,15 @@ class BifrostStateManager {
       }
     }
 
+    let missedJoins = 0;
+    let missedLeaves = 0;
+
     // Reconcile: emit synthetic events for discrepancies
     for (const [username, info] of incoming) {
       const existing = this.players.get(username);
       if (!existing) {
         // Missed join event
+        missedJoins++;
         this.players.set(username, {
           username,
           uuid: info.uuid,
@@ -248,17 +252,30 @@ class BifrostStateManager {
     // Reconcile: synthetic leaves for players no longer in the list
     for (const [username, state] of this.players) {
       if (!incoming.has(username)) {
+        missedLeaves++;
         this.players.delete(username);
         eventBus.emit('player.left', { username, uuid: state.uuid, ip: state.ip, server: state.server });
       }
     }
 
-    // Emit updated list for stats recorder / peak tracker
-    const servers: Record<string, Array<{ username: string; ping: number }>> = {};
-    for (const [server, players] of Object.entries(p.servers)) {
-      servers[server] = players.map((pl) => ({ username: pl.username, ping: pl.ping }));
+    if (missedJoins > 0 || missedLeaves > 0) {
+      logger.warn(
+        { missedJoins, missedLeaves, rawCount: p.count, reconciledCount: this.players.size },
+        'Bifrost list reconciliation detected discrepancies',
+      );
     }
-    eventBus.emit('player.list.updated', { servers, count: p.count });
+
+    // Emit updated list from reconciled state (not raw payload)
+    const servers: Record<string, Array<{ username: string; ping: number }>> = {};
+    for (const state of this.players.values()) {
+      let list = servers[state.server];
+      if (!list) {
+        list = [];
+        servers[state.server] = list;
+      }
+      list.push({ username: state.username, ping: state.ping });
+    }
+    eventBus.emit('player.list.updated', { servers, count: this.players.size });
   }
 
   private onMessage(p: MessagePayload): void {

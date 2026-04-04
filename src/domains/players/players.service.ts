@@ -2,7 +2,6 @@ import type { WithId } from 'mongodb';
 import type { PlayersRepository } from './players.repository.js';
 import { PterodactylClient } from '../servers/pterodactyl.client.js';
 import { ServersRepository } from '../servers/servers.repository.js';
-import { metricsCollector } from './metrics-collector.js';
 import { bifrostStateManager } from '../../plugins/bifrost/state-manager.js';
 import { binaryToUuid, uuidToBinary } from '../../shared/utils/uuid.js';
 import { AppError, NotFoundError } from '../../shared/errors/index.js';
@@ -18,12 +17,6 @@ import type {
   PlayerHistoryDocument,
   PlayerAnalyticsDto,
 } from './players.types.js';
-
-function getActiveSource() {
-  return bifrostStateManager.connected || bifrostStateManager.count > 0
-    ? bifrostStateManager
-    : metricsCollector;
-}
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let nbtLib: any;
@@ -83,14 +76,14 @@ export class PlayersService {
   // ── Online Players ──────────────────────────────────────────────────
 
   getOnlinePlayers(): Record<string, OnlinePlayerDto[]> {
-    return getActiveSource().getOnlinePlayers();
+    return bifrostStateManager.getOnlinePlayers();
   }
 
   // ── Individual Player ─────────────────────────────────────────────
 
   async getPlayer(nick: string): Promise<PlayerDto> {
     const doc = await this.requirePlayer(nick);
-    const info = getActiveSource().getPlayerInfo(doc.username);
+    const info = bifrostStateManager.getPlayerInfo(doc.username);
     return toPlayerDto(doc, !!info, info?.server ?? null, info ? { ping: info.ping } : null);
   }
 
@@ -99,7 +92,7 @@ export class PlayersService {
   async searchPlayers(query: string, limit: number): Promise<PlayerDto[]> {
     const docs = await this.repo.searchByUsername(query, limit);
     return docs.map((doc) => {
-      const info = getActiveSource().getPlayerInfo(doc.username);
+      const info = bifrostStateManager.getPlayerInfo(doc.username);
       return toPlayerDto(doc, !!info, info?.server ?? null, info ? { ping: info.ping } : null);
     });
   }
@@ -183,7 +176,7 @@ export class PlayersService {
       ]);
 
     // Live data from active player source
-    const onlinePlayers = getActiveSource().getOnlinePlayers();
+    const onlinePlayers = bifrostStateManager.getOnlinePlayers();
     const serverCounts: Record<string, number> = {};
     let totalOnline = 0;
     for (const [tag, players] of Object.entries(onlinePlayers)) {
