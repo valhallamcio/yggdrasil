@@ -2,17 +2,6 @@ import type { ObjectId } from 'mongodb';
 
 // ── MongoDB Documents ────────────────────────────────────────────────────────
 
-export interface RebootHistoryEntry {
-  timestamp: Date;
-  reason: string;
-  duration: number;
-}
-
-export interface CpuHistoryEntry {
-  timestamp: number;
-  cpu: number;
-}
-
 export interface ServerDocument {
   _id: ObjectId;
   hostname: string;
@@ -25,20 +14,22 @@ export interface ServerDocument {
   modpack_version: string;
   genre: string;
   early_access: boolean;
+  excludeFromServerList: boolean;
   color: string;
   serverId: string;
   image: string;
-  rtp_max_range: string;
-  rtp_min_range: string;
-  rtp_cooldown: string;
   modpackID: number;
   fileID: number;
-  newestFileID: number;
+  newestFileID?: number;
+  requiresUpdate?: boolean;
   platform: string;
-  requiresUpdate: boolean;
-  rebootHistory: RebootHistoryEntry[];
-  totalReboots: number;
-  cpuHistory: CpuHistoryEntry[];
+  default: boolean;
+  gtnhSlots: boolean;
+  hasVia: boolean;
+  isFabric: boolean;
+  isForge: boolean;
+  mods: unknown[];
+  tags: string[];
 }
 
 export interface ShardDocument {
@@ -99,13 +90,17 @@ export interface ServerDto {
   hostname: string;
   port: number;
   color: string;
-  image: string;
   serverVersion: string;
   modpackVersion: string;
   platform: string;
-  requiresUpdate: boolean;
   earlyAccess: boolean;
+  excludeFromServerList: boolean;
   discordRoleId: string;
+  serverId: string;
+  fileID: number;
+  newestFileID?: number;
+  requiresUpdate?: boolean;
+  modpackID: number;
 }
 
 export interface ServerWithStatsDto extends ServerDto {

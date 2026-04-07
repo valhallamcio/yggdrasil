@@ -17,6 +17,7 @@ import {
   fileWriteBodySchema,
   historyQuerySchema,
   logsQuerySchema,
+  updateServerBodySchema,
 } from './servers.schema.js';
 
 // Composition root
@@ -63,6 +64,13 @@ serversRouter.get(
 );
 
 // ── Protected routes (API key) ─────────────────────────────────────────────
+
+serversRouter.patch(
+  '/:server',
+  apiKeyAuth(),
+  validate({ params: serverParamsSchema, body: updateServerBodySchema }),
+  asyncHandler(controller.update),
+);
 
 serversRouter.get(
   '/:server/history',

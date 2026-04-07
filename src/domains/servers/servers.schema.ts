@@ -43,6 +43,15 @@ export const logsQuerySchema = z.object({
   lines: z.coerce.number().int().min(1).max(5000).default(100),
 });
 
+export const updateServerBodySchema = z.object({
+  modpack_version: z.string().optional(),
+  fileID: z.number().int().optional(),
+  newestFileID: z.number().int().optional(),
+  requiresUpdate: z.boolean().optional(),
+  discord_role_id: z.string().optional(),
+  image: z.string().optional(),
+}).strict();
+
 export type ServerParams = z.infer<typeof serverParamsSchema>;
 export type CommandBody = z.infer<typeof commandBodySchema>;
 export type PowerBody = z.infer<typeof powerBodySchema>;
@@ -52,3 +61,4 @@ export type FileWriteQuery = z.infer<typeof fileWriteQuerySchema>;
 export type FileWriteBody = z.infer<typeof fileWriteBodySchema>;
 export type HistoryQuery = z.infer<typeof historyQuerySchema>;
 export type LogsQuery = z.infer<typeof logsQuerySchema>;
+export type UpdateServerBody = z.infer<typeof updateServerBodySchema>;

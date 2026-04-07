@@ -10,6 +10,7 @@ import type {
   FileWriteBody,
   HistoryQuery,
   LogsQuery,
+  UpdateServerBody,
 } from './servers.schema.js';
 
 export class ServersController {
@@ -31,6 +32,13 @@ export class ServersController {
     const { from, to } = req.query as unknown as HistoryQuery;
     const data = await this.service.getHistory(server, from, to ?? new Date());
     res.json({ data });
+  };
+
+  update = async (req: Request, res: Response): Promise<void> => {
+    const { server } = req.params as unknown as ServerParams;
+    const fields = req.body as UpdateServerBody;
+    await this.service.updateServer(server, fields);
+    res.status(204).send();
   };
 
   sendCommand = async (req: Request, res: Response): Promise<void> => {

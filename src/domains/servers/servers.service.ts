@@ -21,13 +21,17 @@ function toServerDto(doc: WithId<ServerDocument>): ServerDto {
     hostname: doc.hostname,
     port: doc.port,
     color: doc.color,
-    image: doc.image,
     serverVersion: doc.server_version,
     modpackVersion: doc.modpack_version,
     platform: doc.platform,
-    requiresUpdate: doc.requiresUpdate,
     earlyAccess: doc.early_access,
+    excludeFromServerList: doc.excludeFromServerList ?? false,
     discordRoleId: doc.discord_role_id,
+    serverId: doc.serverId,
+    fileID: doc.fileID,
+    newestFileID: doc.newestFileID,
+    requiresUpdate: doc.requiresUpdate,
+    modpackID: doc.modpackID,
   };
 }
 
@@ -131,6 +135,12 @@ export class ServersService {
 
   async getServerResources(tag: string): Promise<ServerWithStatsDto> {
     return this.getServer(tag, true) as Promise<ServerWithStatsDto>;
+  }
+
+  async updateServer(tag: string, fields: Record<string, unknown>): Promise<void> {
+    await this.requireServer(tag);
+    const updated = await this.repo.updateByTag(tag, fields);
+    if (!updated) throw new NotFoundError('Server', tag);
   }
 
   async sendCommand(tag: string, command: string): Promise<void> {

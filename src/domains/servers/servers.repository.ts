@@ -2,7 +2,7 @@ import type { Collection, ObjectId, WithId } from 'mongodb';
 import { getClient, getDb } from '../../core/database/client.js';
 import type { ServerDocument, ShardDocument, StatsHistoryDocument } from './servers.types.js';
 
-const DB_NAME = 'valhallamc';
+const DB_NAME = 'bifrost';
 
 const HOUR = 3_600_000;
 
@@ -45,6 +45,11 @@ export class ServersRepository {
 
   async findByTag(tag: string): Promise<WithId<ServerDocument> | null> {
     return this.servers.findOne({ tag });
+  }
+
+  async updateByTag(tag: string, fields: Record<string, unknown>): Promise<boolean> {
+    const result = await this.servers.updateOne({ tag }, { $set: fields });
+    return result.matchedCount > 0;
   }
 
   async findAllForSync(): Promise<Array<{ _id: ObjectId; tag: string; serverId: string; name: string }>> {
