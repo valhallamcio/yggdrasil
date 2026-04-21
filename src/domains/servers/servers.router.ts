@@ -4,6 +4,7 @@ import { ServersService } from './servers.service.js';
 import { ServersController } from './servers.controller.js';
 import { ServerRegistryRepository } from './server-registry.repository.js';
 import { ServerRegistryController } from './server-registry.controller.js';
+import { playersService } from '../players/players.router.js';
 import { validate } from '../../middleware/validate.js';
 import { asyncHandler } from '../../shared/utils/async-handler.js';
 import { apiKeyAuth, optionalApiKeyAuth } from '../../middleware/auth/api-key.js';
@@ -22,7 +23,7 @@ import {
 
 // Composition root
 const repo = new ServersRepository();
-const service = new ServersService(repo);
+const service = new ServersService(repo, playersService);
 const controller = new ServersController(service);
 
 const registryRepo = new ServerRegistryRepository();
@@ -77,6 +78,13 @@ serversRouter.get(
   apiKeyAuth(),
   validate({ params: serverParamsSchema, query: historyQuerySchema }),
   asyncHandler(controller.getHistory),
+);
+
+serversRouter.get(
+  '/:server/analytics',
+  apiKeyAuth(),
+  validate({ params: serverParamsSchema }),
+  asyncHandler(controller.analytics),
 );
 
 serversRouter.post(

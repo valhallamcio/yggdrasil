@@ -17,6 +17,7 @@ import type {
   PlayerHistoryDocument,
   PlayerAnalyticsDto,
 } from './players.types.js';
+import type { HistoryGranularity } from './players.schema.js';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let nbtLib: any;
@@ -124,8 +125,8 @@ export class PlayersService {
 
   // ── History ───────────────────────────────────────────────────────
 
-  async getPlayerHistory(from: Date, to: Date, server?: string): Promise<PlayerHistoryDocument[]> {
-    const docs = await this.repo.findPlayerHistory(from, to, server);
+  async getPlayerHistory(from: Date, to: Date, server?: string, granularity?: HistoryGranularity): Promise<PlayerHistoryDocument[]> {
+    const docs = await this.repo.findPlayerHistory(from, to, server, granularity);
 
     // Append live snapshot if querying up to "now"
     if (to.getTime() >= Date.now() - 120_000) {
@@ -158,40 +159,51 @@ export class PlayersService {
 
   private analyticsCache = new Map<string, { data: PlayerAnalyticsDto; expiry: number }>();
 
-  async getAnalytics(server?: string): Promise<PlayerAnalyticsDto> {
-    const cacheKey = server ?? '__global__';
+  /**
+   * Global: pass no argument.
+   * Per-server: pass `{ tag, name }` — each aggregation uses the identifier
+   * its backing collection actually stores. Player documents (first_seen,
+   * playtime, leave_dates) key by TAG; `player_sessions.server` stores NAME.
+   */
+  async getAnalytics(filter?: string | { tag: string; name: string }): Promise<PlayerAnalyticsDto> {
+    const tag = typeof filter === 'string' ? filter : filter?.tag;
+    const name = typeof filter === 'string' ? filter : filter?.name;
+    const cacheKey = tag ? `tag:${tag}` : '__global__';
     const cached = this.analyticsCache.get(cacheKey);
     if (cached && cached.expiry > Date.now()) return cached.data;
 
     const [populationStats, newPlayerCounts, uniqueActive, sessionStats, classification, allTimePeak, weeklyGrowth, retentionCohorts] =
       await Promise.all([
-        this.repo.getPopulationStats(server),
-        this.repo.getNewPlayerCounts(server),
-        this.repo.getUniqueActivePlayers(server),
-        this.repo.getSessionStats(server),
-        this.repo.getPlayerClassification(server),
-        this.repo.findAllTimePeak(server),
-        this.repo.getWeeklyGrowth(8, server),
-        this.repo.getRetentionCohorts(8, server),
+        this.repo.getPopulationStats(tag),
+        this.repo.getNewPlayerCounts(tag),
+        // Sessions collection → filter by NAME
+        this.repo.getUniqueActivePlayers(name),
+        this.repo.getSessionStats(name),
+        // Classification blends both: countRegulars/countReturning read sessions;
+        // countInactive reads player docs. The repo handles the split internally.
+        this.repo.getPlayerClassification(tag, name),
+        this.repo.findAllTimePeak(tag),
+        this.repo.getWeeklyGrowth(8, tag),
+        this.repo.getRetentionCohorts(8, { tag, name }),
       ]);
 
-    // Live data from active player source
+    // Live data from active player source (keyed by tag).
     const onlinePlayers = bifrostStateManager.getOnlinePlayers();
     const serverCounts: Record<string, number> = {};
     let totalOnline = 0;
-    for (const [tag, players] of Object.entries(onlinePlayers)) {
-      serverCounts[tag] = players.length;
+    for (const [t, players] of Object.entries(onlinePlayers)) {
+      serverCounts[t] = players.length;
       totalOnline += players.length;
     }
 
     const data: PlayerAnalyticsDto = {
       current: {
-        online: server ? (serverCounts[server] ?? 0) : totalOnline,
+        online: tag ? (serverCounts[tag] ?? 0) : totalOnline,
         servers: serverCounts,
       },
       peaks: {
         allTime: allTimePeak,
-        lastPeak: peakTracker.getLastPeak(server),
+        lastPeak: peakTracker.getLastPeak(tag),
       },
       population: populationStats,
       newPlayers: newPlayerCounts,

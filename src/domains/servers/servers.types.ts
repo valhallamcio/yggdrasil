@@ -191,4 +191,8 @@ export interface StatsHistoryDocument {
   uptime: number;
   tps: number;
   players: number;
+  /** ms in `running` state accumulated during the write interval (since last recorded row). */
+  uptimeDelta: number;
+  /** count of transitions into a non-running state observed during the write interval. */
+  downtimeEvents: number;
 }

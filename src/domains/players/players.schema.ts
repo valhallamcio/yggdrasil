@@ -9,10 +9,13 @@ export const playerServerParamsSchema = z.object({
   tag: z.string().min(1).max(20),
 });
 
+export const historyGranularitySchema = z.enum(['minute5', 'minute15', 'hour', 'hour4', 'hour12', 'day']);
+
 export const historyQuerySchema = z.object({
   from: z.coerce.date(),
   to: z.coerce.date().optional(),
   server: z.string().min(1).max(20).optional(),
+  granularity: historyGranularitySchema.optional(),
 });
 
 export const analyticsQuerySchema = z.object({
@@ -55,6 +58,7 @@ export const editStatsBodySchema = z.object({
 export type PlayerParams = z.infer<typeof playerParamsSchema>;
 export type PlayerServerParams = z.infer<typeof playerServerParamsSchema>;
 export type HistoryQuery = z.infer<typeof historyQuerySchema>;
+export type HistoryGranularity = z.infer<typeof historyGranularitySchema>;
 export type SearchQuery = z.infer<typeof searchQuerySchema>;
 export type LeaderboardQuery = z.infer<typeof leaderboardQuerySchema>;
 export type SkinQuery = z.infer<typeof skinQuerySchema>;

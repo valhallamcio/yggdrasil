@@ -34,6 +34,12 @@ export class ServersController {
     res.json({ data });
   };
 
+  analytics = async (req: Request, res: Response): Promise<void> => {
+    const { server } = req.params as unknown as ServerParams;
+    const data = await this.service.getAnalytics(server);
+    res.json({ data });
+  };
+
   update = async (req: Request, res: Response): Promise<void> => {
     const { server } = req.params as unknown as ServerParams;
     const fields = req.body as UpdateServerBody;

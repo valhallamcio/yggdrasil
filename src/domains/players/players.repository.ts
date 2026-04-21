@@ -1,13 +1,25 @@
 import type { Binary, Collection, WithId } from 'mongodb';
 import { getClient, getDb } from '../../core/database/client.js';
 import type { PlayerDocument, PlayerHistoryDocument, PlayerSessionDocument, PeakRecord } from './players.types.js';
+import type { HistoryGranularity } from './players.schema.js';
 
 const DB_NAME = 'valhallamc';
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 
-function pickBucket(rangeMs: number): { unit: 'minute' | 'hour' | 'day'; binSize: number } | null {
+type Bucket = { unit: 'minute' | 'hour' | 'day'; binSize: number };
+
+const GRANULARITY_BUCKETS: Record<HistoryGranularity, Bucket> = {
+  minute5: { unit: 'minute', binSize: 5 },
+  minute15: { unit: 'minute', binSize: 15 },
+  hour: { unit: 'hour', binSize: 1 },
+  hour4: { unit: 'hour', binSize: 4 },
+  hour12: { unit: 'hour', binSize: 12 },
+  day: { unit: 'day', binSize: 1 },
+};
+
+function pickBucket(rangeMs: number): Bucket | null {
   const hours = rangeMs / HOUR;
   if (hours <= 2) return null;
   if (hours <= 12) return { unit: 'minute', binSize: 5 };
@@ -115,10 +127,10 @@ export class PlayersRepository {
 
   // ── History ───────────────────────────────────────────────────────────
 
-  async findPlayerHistory(from: Date, to: Date, server?: string): Promise<PlayerHistoryDocument[]> {
+  async findPlayerHistory(from: Date, to: Date, server?: string, granularity?: HistoryGranularity): Promise<PlayerHistoryDocument[]> {
     const isAll = server === 'all';
     const sourceFilter = isAll ? {} : { source: server ?? 'global' };
-    const bucket = pickBucket(to.getTime() - from.getTime());
+    const bucket = granularity ? GRANULARITY_BUCKETS[granularity] : pickBucket(to.getTime() - from.getTime());
 
     if (!bucket) {
       return this.history
@@ -335,12 +347,16 @@ export class PlayersRepository {
     return result[0] ?? { totalCount: 0, avgDurationMs: 0 };
   }
 
-  async getPlayerClassification(server?: string): Promise<{ regulars: number; newRegulars: number; inactive: number; returning: number }> {
+  async getPlayerClassification(tag?: string, name?: string): Promise<{ regulars: number; newRegulars: number; inactive: number; returning: number }> {
+    // countRegulars and countReturning read `player_sessions` where the
+    // `server` field is the upstream NAME; countInactive reads player
+    // documents where per-server keys are TAGS. Pass each the identifier its
+    // collection actually uses. Global (both undefined) works for all three.
     const [regulars, previousRegulars, inactive, returning] = await Promise.all([
-      this.countRegulars(14, server),
-      this.countRegulars(14, server, daysAgo(7)),
-      this.countInactive(server),
-      this.countReturning(server),
+      this.countRegulars(14, name),
+      this.countRegulars(14, name, daysAgo(7)),
+      this.countInactive(tag),
+      this.countReturning(name),
     ]);
 
     return {
@@ -487,13 +503,18 @@ export class PlayersRepository {
 
   async getRetentionCohorts(
     weeks: number,
-    server?: string,
+    filter?: string | { tag?: string; name?: string },
   ): Promise<Array<{ cohort: string; cohortSize: number; weeks: Array<{ week: number; returned: number; rate: number }> }>> {
+    // Cohort membership is derived from the players collection (per-server
+    // keys are TAGS). Follow-up returns are counted from `player_sessions`
+    // (server field is the upstream NAME).
+    const tag = typeof filter === 'string' ? filter : filter?.tag;
+    const name = typeof filter === 'string' ? filter : filter?.name;
     const cutoff = daysAgo(weeks * 7);
 
     // Stage 1: Get cohort membership from players collection
-    const addEarliestSeen = server
-      ? [{ $match: { [`first_seen.${server}`]: { $exists: true, $gte: cutoff } } }, { $addFields: { _earliest: `$first_seen.${server}` } }]
+    const addEarliestSeen = tag
+      ? [{ $match: { [`first_seen.${tag}`]: { $exists: true, $gte: cutoff } } }, { $addFields: { _earliest: `$first_seen.${tag}` } }]
       : [
           {
             $addFields: {
@@ -534,8 +555,9 @@ export class PlayersRepository {
     const cohorts = Array.from(cohortMap.entries()).sort(([a], [b]) => a.localeCompare(b));
     const results: Array<{ cohort: string; cohortSize: number; weeks: Array<{ week: number; returned: number; rate: number }> }> = [];
 
-    // Stage 2: For each cohort, one query computes all follow-up weeks at once
-    const serverMatch = server ? { server } : {};
+    // Stage 2: For each cohort, one query computes all follow-up weeks at once.
+    // Session join-ups are matched by NAME.
+    const serverMatch = name ? { server: name } : {};
 
     await Promise.all(
       cohorts.map(async ([cohortWeek, { usernames, earliest }]) => {

@@ -1,6 +1,7 @@
 import type WebSocket from 'ws';
 import { eventBus } from '../../core/event-bus/index.js';
 import { logger } from '../../core/logger/index.js';
+import { ServersRepository } from '../../domains/servers/servers.repository.js';
 import type { OnlinePlayerDto } from '../../domains/players/players.types.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -26,6 +27,8 @@ export interface ServerStatus {
   networkRxBytes: number;
   networkTxBytes: number;
   uptime: number;
+  tps: number;
+  players: number;
   lastUpdated: string;
 }
 
@@ -48,14 +51,19 @@ interface PositionPayload { username: string; server: string; x: number; y: numb
 
 // ── State Manager ────────────────────────────────────────────────────────────
 
+const SHARD_SYNC_INTERVAL_MS = 10_000;
+
 class BifrostStateManager {
   private players = new Map<string, PlayerState>();
   private servers = new Map<string, ServerStatus>();
   private activeWs: WebSocket | null = null;
   connected = false;
+  private readonly serversRepo = new ServersRepository();
+  private shardSyncTimer: NodeJS.Timeout | null = null;
 
   constructor() {
     eventBus.on('server.stats', ({ server, stats }) => {
+      const existing = this.servers.get(server);
       const entry: ServerStatus = {
         tag: server,
         state: stats.state,
@@ -66,6 +74,8 @@ class BifrostStateManager {
         networkRxBytes: stats.network.rx_bytes,
         networkTxBytes: stats.network.tx_bytes,
         uptime: stats.uptime,
+        tps: existing?.tps ?? 0,
+        players: this.countPlayersOn(server),
         lastUpdated: new Date().toISOString(),
       };
       this.servers.set(server, entry);
@@ -77,6 +87,52 @@ class BifrostStateManager {
       if (existing) existing.state = currentState;
       this.sendToProxy('server.state.changed', { tag: server, previousState, currentState });
     });
+
+    this.startShardSync();
+  }
+
+  /** Count players currently on a given server tag. */
+  private countPlayersOn(tag: string): number {
+    let n = 0;
+    for (const p of this.players.values()) if (p.server === tag) n++;
+    return n;
+  }
+
+  /** Refresh players counts on every entry from current player map. */
+  private refreshPlayerCounts(): void {
+    for (const entry of this.servers.values()) {
+      entry.players = this.countPlayersOn(entry.tag);
+    }
+  }
+
+  /** Periodically fetch shard docs and hydrate tps + players onto ServerStatus entries. */
+  private startShardSync(): void {
+    const sync = async (): Promise<void> => {
+      try {
+        const shards = await this.serversRepo.findAllShards();
+        const docs = await this.serversRepo.findAll();
+        for (const shard of shards) {
+          const doc = docs.find((d) => d._id.equals(shard.server));
+          if (!doc) continue;
+          const entry = this.servers.get(doc.tag);
+          if (!entry) continue;
+          entry.tps = Math.round(shard.tps * 100) / 100;
+          // Prefer live player count from our in-memory map; fall back to shard.
+          entry.players = this.countPlayersOn(doc.tag) || shard.players;
+        }
+      } catch (err) {
+        logger.debug({ err }, 'BifrostStateManager: shard sync failed');
+      }
+    };
+    void sync();
+    this.shardSyncTimer = setInterval(() => void sync(), SHARD_SYNC_INTERVAL_MS);
+  }
+
+  stopShardSync(): void {
+    if (this.shardSyncTimer) {
+      clearInterval(this.shardSyncTimer);
+      this.shardSyncTimer = null;
+    }
   }
 
   // ── Outbound ─────────────────────────────────────────────────────────────
@@ -102,17 +158,14 @@ class BifrostStateManager {
     if (ws !== this.activeWs) return;
     this.connected = false;
     this.activeWs = null;
-    logger.warn('Bifrost proxy disconnected — emitting synthetic player.left for all tracked players');
+    logger.warn('Bifrost proxy disconnected — keeping tracked player state intact; next connected snapshot will reconcile');
 
-    for (const state of this.players.values()) {
-      eventBus.emit('player.left', {
-        username: state.username,
-        uuid: state.uuid,
-        ip: state.ip,
-        server: state.server,
-      });
-    }
-    this.players.clear();
+    // Intentionally NOT emitting synthetic `player.left` here. Downstream SSE
+    // consumers would see their cached counts decrement to zero and flash
+    // empty rows during a brief reconnect. The next proxy.state snapshot
+    // after reconnect is authoritative and will fix any drift.
+    // this.players is retained so a reconnect without player changes stays
+    // a no-op from the client's perspective.
   }
 
   // ── Message routing ──────────────────────────────────────────────────────
@@ -161,6 +214,9 @@ class BifrostStateManager {
       lastSeen: new Date(),
     });
 
+    const entry = this.servers.get(p.server);
+    if (entry) entry.players = this.countPlayersOn(p.server);
+
     eventBus.emit('player.joined', {
       username: p.username,
       uuid: p.uuid,
@@ -174,6 +230,9 @@ class BifrostStateManager {
     const state = this.players.get(p.username);
     if (!state) return;
     this.players.delete(p.username);
+
+    const entry = this.servers.get(state.server);
+    if (entry) entry.players = this.countPlayersOn(state.server);
 
     eventBus.emit('player.left', {
       username: p.username,
@@ -189,6 +248,11 @@ class BifrostStateManager {
       state.server = p.currentServer;
       state.lastSeen = new Date();
     }
+
+    const prevEntry = this.servers.get(p.previousServer);
+    if (prevEntry) prevEntry.players = this.countPlayersOn(p.previousServer);
+    const currEntry = this.servers.get(p.currentServer);
+    if (currEntry) currEntry.players = this.countPlayersOn(p.currentServer);
 
     eventBus.emit('player.server.changed', {
       username: p.username,
@@ -264,6 +328,8 @@ class BifrostStateManager {
         'Bifrost list reconciliation detected discrepancies',
       );
     }
+
+    this.refreshPlayerCounts();
 
     // Emit updated list from reconciled state (not raw payload)
     const servers: Record<string, Array<{ username: string; ping: number }>> = {};

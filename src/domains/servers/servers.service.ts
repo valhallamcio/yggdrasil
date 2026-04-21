@@ -1,5 +1,6 @@
 import type { WithId } from 'mongodb';
 import type { ServersRepository } from './servers.repository.js';
+import type { PlayersService } from '../players/players.service.js';
 import { PterodactylClient } from './pterodactyl.client.js';
 import { pterodactylWsManager } from './pterodactyl-ws.manager.js';
 import { NotFoundError } from '../../shared/errors/index.js';
@@ -11,6 +12,7 @@ import type {
   FileEntryDto,
   StatsHistoryDocument,
 } from './servers.types.js';
+import type { PlayerAnalyticsDto } from '../players/players.types.js';
 
 function toServerDto(doc: WithId<ServerDocument>): ServerDto {
   return {
@@ -60,7 +62,10 @@ function toServerPublicDto(
 export class ServersService {
   private readonly pterodactyl = new PterodactylClient();
 
-  constructor(private readonly repo: ServersRepository) {}
+  constructor(
+    private readonly repo: ServersRepository,
+    private readonly playersService?: PlayersService,
+  ) {}
 
   async getServers(authenticated: boolean): Promise<ServerWithStatsDto[] | ServerPublicDto[]> {
     const [docs, shards] = await Promise.all([
@@ -185,6 +190,19 @@ export class ServersService {
   async getHistory(tag: string, from: Date, to: Date): Promise<StatsHistoryDocument[]> {
     await this.requireServer(tag);
     return this.repo.findStatsHistory(tag, from, to);
+  }
+
+  async getAnalytics(tag: string): Promise<PlayerAnalyticsDto> {
+    const doc = await this.requireServer(tag);
+    if (!this.playersService) {
+      throw new Error('ServersService constructed without PlayersService — analytics unavailable');
+    }
+    // Player documents key per-server fields (first_seen/playtime/leave_dates)
+    // by the server TAG. The `player_sessions` collection, however, stores its
+    // `server` field as the upstream server NAME (what bifrost emits) — not
+    // the tag. Pass both so each aggregation can pick the identifier its
+    // underlying collection actually uses.
+    return this.playersService.getAnalytics({ tag, name: doc.name });
   }
 
   private async requireServer(tag: string): Promise<WithId<ServerDocument>> {

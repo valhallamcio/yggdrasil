@@ -80,6 +80,8 @@ export class ServersRepository {
         .toArray();
     }
 
+    const bucketMs = bucketToMs(bucket);
+
     return this.history
       .aggregate<StatsHistoryDocument>([
         { $match: { server: tag, timestamp: { $gte: from, $lte: to } } },
@@ -98,6 +100,8 @@ export class ServersRepository {
             uptime: { $max: '$uptime' },
             tps: { $avg: '$tps' },
             players: { $max: '$players' },
+            uptimeMs: { $sum: { $ifNull: ['$uptimeDelta', 0] } },
+            downtimeEvents: { $sum: { $ifNull: ['$downtimeEvents', 0] } },
           },
         },
         { $sort: { _id: 1 } },
@@ -116,9 +120,22 @@ export class ServersRepository {
             uptime: 1,
             tps: { $round: ['$tps', 2] },
             players: 1,
+            uptimeMs: 1,
+            downtimeEvents: 1,
+            uptimePct: {
+              $round: [{ $min: [1, { $divide: ['$uptimeMs', bucketMs] }] }, 4],
+            },
           },
         },
       ])
       .toArray();
+  }
+}
+
+function bucketToMs(bucket: { unit: 'minute' | 'hour' | 'day'; binSize: number }): number {
+  switch (bucket.unit) {
+    case 'minute': return bucket.binSize * 60_000;
+    case 'hour': return bucket.binSize * 3_600_000;
+    case 'day': return bucket.binSize * 86_400_000;
   }
 }

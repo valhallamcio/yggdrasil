@@ -10,6 +10,12 @@ const THROTTLE_MS = 60_000; // Write at most once every 60 seconds per server
 
 class StatsRecorder {
   private readonly lastWrite = new Map<string, number>();
+  /** Last observed state for accurate uptime/downtime attribution between throttled writes. */
+  private readonly lastStateSeen = new Map<string, { state: string; at: number }>();
+  /** ms accumulated in `running` state since last write, per tag. */
+  private readonly uptimeAccum = new Map<string, number>();
+  /** Count of transitions into a non-running state since last write, per tag. */
+  private readonly downtimeAccum = new Map<string, number>();
   private repo?: ServersRepository;
   private listening = false;
 
@@ -52,6 +58,20 @@ class StatsRecorder {
     if (!this.listening) return;
 
     const now = Date.now();
+
+    // Accumulate state-based uptime/downtime between writes (runs on every stats event, not throttled).
+    const prev = this.lastStateSeen.get(server);
+    if (prev) {
+      const dt = now - prev.at;
+      if (prev.state === 'running') {
+        this.uptimeAccum.set(server, (this.uptimeAccum.get(server) ?? 0) + dt);
+      }
+      if (prev.state === 'running' && stats.state !== 'running') {
+        this.downtimeAccum.set(server, (this.downtimeAccum.get(server) ?? 0) + 1);
+      }
+    }
+    this.lastStateSeen.set(server, { state: stats.state, at: now });
+
     const lastTime = this.lastWrite.get(server) ?? 0;
     if (now - lastTime < THROTTLE_MS) return;
 
@@ -72,6 +92,11 @@ class StatsRecorder {
         }
       }
 
+      const uptimeDelta = this.uptimeAccum.get(tag) ?? 0;
+      const downtimeEvents = this.downtimeAccum.get(tag) ?? 0;
+      this.uptimeAccum.set(tag, 0);
+      this.downtimeAccum.set(tag, 0);
+
       const doc: StatsHistoryDocument = {
         timestamp: new Date(),
         server: tag,
@@ -85,6 +110,8 @@ class StatsRecorder {
         uptime: stats.uptime,
         tps,
         players,
+        uptimeDelta,
+        downtimeEvents,
       };
 
       await this.repo!.history.insertOne(doc);

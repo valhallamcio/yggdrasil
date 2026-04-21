@@ -40,8 +40,8 @@ export class PlayersController {
   };
 
   history = async (req: Request, res: Response): Promise<void> => {
-    const { from, to, server } = req.query as unknown as HistoryQuery;
-    const data = await this.service.getPlayerHistory(from, to ?? new Date(), server);
+    const { from, to, server, granularity } = req.query as unknown as HistoryQuery;
+    const data = await this.service.getPlayerHistory(from, to ?? new Date(), server, granularity);
     res.json({ data });
   };
 
