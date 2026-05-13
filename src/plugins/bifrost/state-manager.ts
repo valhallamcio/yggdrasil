@@ -11,6 +11,7 @@ export interface PlayerState {
   uuid: string;
   ip: string;
   server: string;
+  instance: string | null;
   ping: number;
   position: { x: number; y: number; z: number } | null;
   joinedAt: Date;
@@ -42,10 +43,10 @@ export interface ProxyStateSnapshot {
 
 // ── Inbound message shapes (from Bifrost) ────────────────────────────────────
 
-interface JoinedPayload { username: string; uuid: string; ip: string; server: string }
+interface JoinedPayload { username: string; uuid: string; ip: string; server: string; instance?: string }
 interface LeftPayload { username: string; uuid: string; ip: string; server: string }
-interface ServerChangedPayload { username: string; uuid: string; ip: string; previousServer: string; currentServer: string }
-interface ListUpdatedPayload { servers: Record<string, Array<{ username: string; uuid?: string; ping: number }>>; count: number }
+interface ServerChangedPayload { username: string; uuid: string; ip: string; previousServer: string; currentServer: string; instance?: string }
+interface ListUpdatedPayload { servers: Record<string, Array<{ username: string; uuid?: string; ping: number; instance?: string }>>; count: number }
 interface MessagePayload { username: string; uuid: string; server: string; message: string }
 interface PositionPayload { username: string; server: string; x: number; y: number; z: number }
 
@@ -208,6 +209,7 @@ class BifrostStateManager {
       uuid: p.uuid,
       ip: p.ip,
       server: p.server,
+      instance: p.instance ?? null,
       ping: 0,
       position: null,
       joinedAt: new Date(),
@@ -246,6 +248,7 @@ class BifrostStateManager {
     const state = this.players.get(p.username);
     if (state) {
       state.server = p.currentServer;
+      if (p.instance !== undefined) state.instance = p.instance;
       state.lastSeen = new Date();
     }
 
@@ -265,10 +268,10 @@ class BifrostStateManager {
 
   private onListUpdated(p: ListUpdatedPayload): void {
     // Build canonical map from the authoritative list
-    const incoming = new Map<string, { uuid: string; server: string; ping: number }>();
+    const incoming = new Map<string, { uuid: string; server: string; instance: string | null; ping: number }>();
     for (const [server, players] of Object.entries(p.servers)) {
       for (const player of players) {
-        incoming.set(player.username, { uuid: player.uuid ?? '', server, ping: player.ping });
+        incoming.set(player.username, { uuid: player.uuid ?? '', server, instance: player.instance ?? null, ping: player.ping });
       }
     }
 
@@ -286,6 +289,7 @@ class BifrostStateManager {
           uuid: info.uuid,
           ip: '',
           server: info.server,
+          instance: info.instance,
           ping: info.ping,
           position: null,
           joinedAt: new Date(),
@@ -293,10 +297,10 @@ class BifrostStateManager {
         });
         eventBus.emit('player.joined', { username, uuid: info.uuid, ip: '', server: info.server, ping: info.ping });
       } else {
-        // Update ping always
         existing.ping = info.ping;
         existing.lastSeen = new Date();
         if (existing.uuid === '' && info.uuid) existing.uuid = info.uuid;
+        if (info.instance !== null) existing.instance = info.instance;
 
         if (existing.server !== info.server) {
           // Missed server change
@@ -399,7 +403,7 @@ class BifrostStateManager {
         list = [];
         grouped[state.server] = list;
       }
-      list.push({ username: state.username, server: state.server, ping: state.ping });
+      list.push({ username: state.username, server: state.server, instance: state.instance, ping: state.ping });
     }
     return grouped;
   }

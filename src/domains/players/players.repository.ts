@@ -347,16 +347,12 @@ export class PlayersRepository {
     return result[0] ?? { totalCount: 0, avgDurationMs: 0 };
   }
 
-  async getPlayerClassification(tag?: string, name?: string): Promise<{ regulars: number; newRegulars: number; inactive: number; returning: number }> {
-    // countRegulars and countReturning read `player_sessions` where the
-    // `server` field is the upstream NAME; countInactive reads player
-    // documents where per-server keys are TAGS. Pass each the identifier its
-    // collection actually uses. Global (both undefined) works for all three.
+  async getPlayerClassification(tag?: string): Promise<{ regulars: number; newRegulars: number; inactive: number; returning: number }> {
     const [regulars, previousRegulars, inactive, returning] = await Promise.all([
-      this.countRegulars(14, name),
-      this.countRegulars(14, name, daysAgo(7)),
+      this.countRegulars(14, tag),
+      this.countRegulars(14, tag, daysAgo(7)),
       this.countInactive(tag),
-      this.countReturning(name),
+      this.countReturning(tag),
     ]);
 
     return {
@@ -503,13 +499,8 @@ export class PlayersRepository {
 
   async getRetentionCohorts(
     weeks: number,
-    filter?: string | { tag?: string; name?: string },
+    tag?: string,
   ): Promise<Array<{ cohort: string; cohortSize: number; weeks: Array<{ week: number; returned: number; rate: number }> }>> {
-    // Cohort membership is derived from the players collection (per-server
-    // keys are TAGS). Follow-up returns are counted from `player_sessions`
-    // (server field is the upstream NAME).
-    const tag = typeof filter === 'string' ? filter : filter?.tag;
-    const name = typeof filter === 'string' ? filter : filter?.name;
     const cutoff = daysAgo(weeks * 7);
 
     // Stage 1: Get cohort membership from players collection
@@ -555,9 +546,7 @@ export class PlayersRepository {
     const cohorts = Array.from(cohortMap.entries()).sort(([a], [b]) => a.localeCompare(b));
     const results: Array<{ cohort: string; cohortSize: number; weeks: Array<{ week: number; returned: number; rate: number }> }> = [];
 
-    // Stage 2: For each cohort, one query computes all follow-up weeks at once.
-    // Session join-ups are matched by NAME.
-    const serverMatch = name ? { server: name } : {};
+    const serverMatch = tag ? { server: tag } : {};
 
     await Promise.all(
       cohorts.map(async ([cohortWeek, { usernames, earliest }]) => {

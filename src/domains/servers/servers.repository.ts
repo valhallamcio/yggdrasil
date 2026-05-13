@@ -48,8 +48,12 @@ export class ServersRepository {
   }
 
   async updateByTag(tag: string, fields: Record<string, unknown>): Promise<boolean> {
-    const result = await this.servers.updateOne({ tag }, { $set: fields });
+    const result = await this.servers.updateMany({ tag }, { $set: fields });
     return result.matchedCount > 0;
+  }
+
+  async findAllByTag(tag: string): Promise<WithId<ServerDocument>[]> {
+    return this.servers.find({ tag }).toArray();
   }
 
   async findAllForSync(): Promise<Array<{ _id: ObjectId; tag: string; serverId: string; name: string }>> {

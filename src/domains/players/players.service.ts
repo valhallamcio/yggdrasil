@@ -159,15 +159,8 @@ export class PlayersService {
 
   private analyticsCache = new Map<string, { data: PlayerAnalyticsDto; expiry: number }>();
 
-  /**
-   * Global: pass no argument.
-   * Per-server: pass `{ tag, name }` — each aggregation uses the identifier
-   * its backing collection actually stores. Player documents (first_seen,
-   * playtime, leave_dates) key by TAG; `player_sessions.server` stores NAME.
-   */
-  async getAnalytics(filter?: string | { tag: string; name: string }): Promise<PlayerAnalyticsDto> {
-    const tag = typeof filter === 'string' ? filter : filter?.tag;
-    const name = typeof filter === 'string' ? filter : filter?.name;
+  async getAnalytics(filter?: string): Promise<PlayerAnalyticsDto> {
+    const tag = filter;
     const cacheKey = tag ? `tag:${tag}` : '__global__';
     const cached = this.analyticsCache.get(cacheKey);
     if (cached && cached.expiry > Date.now()) return cached.data;
@@ -176,15 +169,12 @@ export class PlayersService {
       await Promise.all([
         this.repo.getPopulationStats(tag),
         this.repo.getNewPlayerCounts(tag),
-        // Sessions collection → filter by NAME
-        this.repo.getUniqueActivePlayers(name),
-        this.repo.getSessionStats(name),
-        // Classification blends both: countRegulars/countReturning read sessions;
-        // countInactive reads player docs. The repo handles the split internally.
-        this.repo.getPlayerClassification(tag, name),
+        this.repo.getUniqueActivePlayers(tag),
+        this.repo.getSessionStats(tag),
+        this.repo.getPlayerClassification(tag),
         this.repo.findAllTimePeak(tag),
         this.repo.getWeeklyGrowth(8, tag),
-        this.repo.getRetentionCohorts(8, { tag, name }),
+        this.repo.getRetentionCohorts(8, tag),
       ]);
 
     // Live data from active player source (keyed by tag).

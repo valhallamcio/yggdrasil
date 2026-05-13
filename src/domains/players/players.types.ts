@@ -18,6 +18,7 @@ export interface PlayerDocument {
 export interface OnlinePlayerDto {
   username: string;
   server: string;
+  instance?: string | null;
   ping: number;
 }
 

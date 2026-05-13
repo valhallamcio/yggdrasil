@@ -74,8 +74,14 @@ export class ServersService {
     ]);
 
     if (!authenticated) {
+      const seenTags = new Set<string>();
       return docs
         .filter((d) => !d.early_access)
+        .filter((d) => {
+          if (seenTags.has(d.tag)) return false;
+          seenTags.add(d.tag);
+          return true;
+        })
         .map((doc) => {
           const stats = pterodactylWsManager.getStats(doc.tag);
           const shard = shards.find((s) => s.server.equals(doc._id));
@@ -193,16 +199,11 @@ export class ServersService {
   }
 
   async getAnalytics(tag: string): Promise<PlayerAnalyticsDto> {
-    const doc = await this.requireServer(tag);
+    await this.requireServer(tag);
     if (!this.playersService) {
       throw new Error('ServersService constructed without PlayersService — analytics unavailable');
     }
-    // Player documents key per-server fields (first_seen/playtime/leave_dates)
-    // by the server TAG. The `player_sessions` collection, however, stores its
-    // `server` field as the upstream server NAME (what bifrost emits) — not
-    // the tag. Pass both so each aggregation can pick the identifier its
-    // underlying collection actually uses.
-    return this.playersService.getAnalytics({ tag, name: doc.name });
+    return this.playersService.getAnalytics(tag);
   }
 
   private async requireServer(tag: string): Promise<WithId<ServerDocument>> {
