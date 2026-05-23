@@ -82,12 +82,16 @@ class PterodactylWsManager {
         });
         await this.connectServer(server.tag, server.serverId);
       } else {
-        // Update metadata for existing servers
         this.serverLookup.set(server.tag, {
           serverId: server.serverId,
           name: server.name,
           serverOid: server._id,
         });
+        // Reconnect if WS connection died and reconnect attempts were exhausted
+        if (!this.connections.has(server.tag)) {
+          logger.info({ tag: server.tag }, 'Dead connection detected, reconnecting');
+          await this.connectServer(server.tag, server.serverId);
+        }
       }
     }
 
