@@ -137,7 +137,7 @@ class PlayerStatsRecorder {
             timestamp: now,
             source: prev,
             playerCount: 0,
-            peakPlayerCount: 0,
+            peakPlayerCount: this.peakServers[prev] ?? 0,
             avgPing: 0,
           });
         }
