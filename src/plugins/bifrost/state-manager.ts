@@ -119,7 +119,8 @@ class BifrostStateManager {
           if (!entry) continue;
           entry.tps = Math.round(shard.tps * 100) / 100;
           // Prefer live player count from our in-memory map; fall back to shard.
-          entry.players = this.countPlayersOn(doc.tag) || shard.players;
+          const liveCount = this.countPlayersOn(doc.tag);
+          entry.players = liveCount > 0 ? liveCount : shard.players;
         }
       } catch (err) {
         logger.debug({ err }, 'BifrostStateManager: shard sync failed');

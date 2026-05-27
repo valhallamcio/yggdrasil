@@ -20,6 +20,7 @@ class PlayerStatsRecorder {
   private peakGlobal = 0;
   private peakServers: Record<string, number> = {};
   private latestPayload: PlayerPayload | null = null;
+  private previousServers = new Set<string>();
 
   async start(): Promise<void> {
     const db = getDb();
@@ -112,7 +113,9 @@ class PlayerStatsRecorder {
       });
 
       // Per-server documents
+      const currentServers = new Set<string>();
       for (const [server, players] of Object.entries(payload.servers)) {
+        currentServers.add(server);
         let serverPing = 0;
         for (const p of players) {
           serverPing += p.ping;
@@ -126,6 +129,20 @@ class PlayerStatsRecorder {
           avgPing: count > 0 ? Math.round((serverPing / count) * 100) / 100 : 0,
         });
       }
+
+      // Write a zero entry for servers that had players last write but don't now
+      this.previousServers.forEach((prev) => {
+        if (!currentServers.has(prev)) {
+          docs.push({
+            timestamp: now,
+            source: prev,
+            playerCount: 0,
+            peakPlayerCount: 0,
+            avgPing: 0,
+          });
+        }
+      });
+      this.previousServers = currentServers;
 
       await this.repo!.history.insertMany(docs);
 
