@@ -81,6 +81,13 @@ serversRouter.get(
 );
 
 serversRouter.get(
+  '/:server/instances/:instanceId/history',
+  apiKeyAuth(),
+  validate({ params: serverParamsSchema, query: historyQuerySchema }),
+  asyncHandler(controller.getInstanceHistory),
+);
+
+serversRouter.get(
   '/:server/analytics',
   apiKeyAuth(),
   validate({ params: serverParamsSchema }),

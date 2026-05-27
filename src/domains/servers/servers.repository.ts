@@ -75,11 +75,12 @@ export class ServersRepository {
   // ── Stats History ────────────────────────────────────────────────────────
 
   async findStatsHistory(tag: string, from: Date, to: Date): Promise<StatsHistoryDocument[]> {
+    const serverMatch = { $regex: new RegExp(`^${escapeRegex(tag)}(:|$)`) };
     const bucket = pickBucket(to.getTime() - from.getTime());
 
     if (!bucket) {
       return this.history
-        .find({ server: tag, timestamp: { $gte: from, $lte: to } })
+        .find({ server: serverMatch, timestamp: { $gte: from, $lte: to } })
         .sort({ timestamp: 1 })
         .toArray();
     }
@@ -88,7 +89,7 @@ export class ServersRepository {
 
     return this.history
       .aggregate<StatsHistoryDocument>([
-        { $match: { server: tag, timestamp: { $gte: from, $lte: to } } },
+        { $match: { server: serverMatch, timestamp: { $gte: from, $lte: to } } },
         { $sort: { timestamp: 1 } },
         {
           $group: {
@@ -134,6 +135,71 @@ export class ServersRepository {
       ])
       .toArray();
   }
+
+  async findInstanceStatsHistory(instanceKey: string, from: Date, to: Date): Promise<StatsHistoryDocument[]> {
+    const bucket = pickBucket(to.getTime() - from.getTime());
+
+    if (!bucket) {
+      return this.history
+        .find({ server: instanceKey, timestamp: { $gte: from, $lte: to } })
+        .sort({ timestamp: 1 })
+        .toArray();
+    }
+
+    const bucketMs = bucketToMs(bucket);
+
+    return this.history
+      .aggregate<StatsHistoryDocument>([
+        { $match: { server: instanceKey, timestamp: { $gte: from, $lte: to } } },
+        { $sort: { timestamp: 1 } },
+        {
+          $group: {
+            _id: { $dateTrunc: { date: '$timestamp', unit: bucket.unit, binSize: bucket.binSize } },
+            server: { $first: '$server' },
+            status: { $last: '$status' },
+            cpu: { $avg: '$cpu' },
+            memoryBytes: { $avg: '$memoryBytes' },
+            memoryLimitBytes: { $max: '$memoryLimitBytes' },
+            diskBytes: { $avg: '$diskBytes' },
+            networkRxBytes: { $max: '$networkRxBytes' },
+            networkTxBytes: { $max: '$networkTxBytes' },
+            uptime: { $max: '$uptime' },
+            tps: { $avg: '$tps' },
+            players: { $max: '$players' },
+            uptimeMs: { $sum: { $ifNull: ['$uptimeDelta', 0] } },
+            downtimeEvents: { $sum: { $ifNull: ['$downtimeEvents', 0] } },
+          },
+        },
+        { $sort: { _id: 1 } },
+        {
+          $project: {
+            _id: 0,
+            timestamp: '$_id',
+            server: 1,
+            status: 1,
+            cpu: { $round: ['$cpu', 2] },
+            memoryBytes: { $round: ['$memoryBytes', 0] },
+            memoryLimitBytes: 1,
+            diskBytes: { $round: ['$diskBytes', 0] },
+            networkRxBytes: 1,
+            networkTxBytes: 1,
+            uptime: 1,
+            tps: { $round: ['$tps', 2] },
+            players: 1,
+            uptimeMs: 1,
+            downtimeEvents: 1,
+            uptimePct: {
+              $round: [{ $min: [1, { $divide: ['$uptimeMs', bucketMs] }] }, 4],
+            },
+          },
+        },
+      ])
+      .toArray();
+  }
+}
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function bucketToMs(bucket: { unit: 'minute' | 'hour' | 'day'; binSize: number }): number {

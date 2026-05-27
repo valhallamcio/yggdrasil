@@ -83,20 +83,20 @@ export class ServersService {
           return true;
         })
         .map((doc) => {
-          const stats = pterodactylWsManager.getStats(doc.tag);
+          const stats = pterodactylWsManager.getStatsByServerId(doc.serverId);
           const shard = shards.find((s) => s.server.equals(doc._id));
-          const status = stats?.state ?? pterodactylWsManager.getStatus(doc.tag) ?? 'unknown';
+          const status = stats?.state ?? pterodactylWsManager.getStatusByServerId(doc.serverId) ?? pterodactylWsManager.getStatus(doc.tag) ?? 'unknown';
           return toServerPublicDto(doc, status, shard?.players ?? 0, shard?.tps ?? 0);
         });
     }
 
     return docs.map((doc) => {
-      const stats = pterodactylWsManager.getStats(doc.tag);
+      const stats = pterodactylWsManager.getStatsByServerId(doc.serverId);
       const shard = shards.find((s) => s.server.equals(doc._id));
 
       return {
         ...toServerDto(doc),
-        status: stats?.state ?? pterodactylWsManager.getStatus(doc.tag) ?? 'unknown',
+        status: stats?.state ?? pterodactylWsManager.getStatusByServerId(doc.serverId) ?? pterodactylWsManager.getStatus(doc.tag) ?? 'unknown',
         cpu: stats?.cpu_absolute ?? 0,
         memoryBytes: stats?.memory_bytes ?? 0,
         memoryLimitBytes: stats?.memory_limit_bytes ?? 0,
@@ -196,6 +196,11 @@ export class ServersService {
   async getHistory(tag: string, from: Date, to: Date): Promise<StatsHistoryDocument[]> {
     await this.requireServer(tag);
     return this.repo.findStatsHistory(tag, from, to);
+  }
+
+  async getInstanceHistory(tag: string, serverId: string, from: Date, to: Date): Promise<StatsHistoryDocument[]> {
+    await this.requireServer(tag);
+    return this.repo.findInstanceStatsHistory(`${tag}:${serverId}`, from, to);
   }
 
   async getAnalytics(tag: string): Promise<PlayerAnalyticsDto> {

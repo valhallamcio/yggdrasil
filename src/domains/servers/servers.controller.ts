@@ -34,6 +34,13 @@ export class ServersController {
     res.json({ data });
   };
 
+  getInstanceHistory = async (req: Request, res: Response): Promise<void> => {
+    const { server, instanceId } = req.params as unknown as { server: string; instanceId: string };
+    const { from, to } = req.query as unknown as HistoryQuery;
+    const data = await this.service.getInstanceHistory(server, instanceId, from, to ?? new Date());
+    res.json({ data });
+  };
+
   analytics = async (req: Request, res: Response): Promise<void> => {
     const { server } = req.params as unknown as ServerParams;
     const data = await this.service.getAnalytics(server);

@@ -18,13 +18,13 @@ export type AppEvent =
   | { type: 'scheduler.job.completed'; payload: { jobId: string; durationMs: number } }
   | { type: 'scheduler.job.failed'; payload: { jobId: string; error: string } }
   | { type: 'donation.received'; payload: { channelId: string; message: string } }
-  | { type: 'server.stats'; payload: { server: string; serverOid: import('mongodb').ObjectId; stats: ServerStatsPayload } }
-  | { type: 'server.state.changed'; payload: { server: string; serverName: string; previousState: string; currentState: string } }
-  | { type: 'server.crashed'; payload: { server: string; serverName: string; previousState: string; currentState: string; reason: string } }
-  | { type: 'server.recovered'; payload: { server: string; serverName: string } }
-  | { type: 'server.crash-loop.started'; payload: { server: string; serverName: string; crashCount: number } }
-  | { type: 'server.crash-loop.ended'; payload: { server: string; serverName: string } }
-  | { type: 'server.console.output'; payload: { server: string; line: string } }
+  | { type: 'server.stats'; payload: { server: string; serverOid: import('mongodb').ObjectId; stats: ServerStatsPayload; serverId?: string; instanceKey?: string } }
+  | { type: 'server.state.changed'; payload: { server: string; serverName: string; previousState: string; currentState: string; serverId?: string } }
+  | { type: 'server.crashed'; payload: { server: string; serverName: string; previousState: string; currentState: string; reason: string; serverId?: string } }
+  | { type: 'server.recovered'; payload: { server: string; serverName: string; serverId?: string } }
+  | { type: 'server.crash-loop.started'; payload: { server: string; serverName: string; crashCount: number; serverId?: string } }
+  | { type: 'server.crash-loop.ended'; payload: { server: string; serverName: string; serverId?: string } }
+  | { type: 'server.console.output'; payload: { server: string; line: string; serverId?: string } }
   | { type: 'player.joined'; payload: { username: string; uuid: string; ip: string; server: string; ping: number } }
   | { type: 'player.left'; payload: { username: string; uuid: string; ip: string; server: string } }
   | { type: 'player.server.changed'; payload: { username: string; uuid: string; ip: string; previousServer: string; currentServer: string } }

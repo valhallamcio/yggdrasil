@@ -54,32 +54,32 @@ class StatsRecorder {
     logger.info('Stats recorder stopped');
   }
 
-  private onStats = ({ server, serverOid, stats }: { server: string; serverOid: ObjectId; stats: ServerStatsPayload }): void => {
+  private onStats = ({ server, serverOid, stats, instanceKey }: { server: string; serverOid: ObjectId; stats: ServerStatsPayload; instanceKey?: string }): void => {
     if (!this.listening) return;
 
+    const key = instanceKey ?? server;
     const now = Date.now();
 
-    // Accumulate state-based uptime/downtime between writes (runs on every stats event, not throttled).
-    const prev = this.lastStateSeen.get(server);
+    const prev = this.lastStateSeen.get(key);
     if (prev) {
       const dt = now - prev.at;
       if (prev.state === 'running') {
-        this.uptimeAccum.set(server, (this.uptimeAccum.get(server) ?? 0) + dt);
+        this.uptimeAccum.set(key, (this.uptimeAccum.get(key) ?? 0) + dt);
       }
       if (prev.state === 'running' && stats.state !== 'running') {
-        this.downtimeAccum.set(server, (this.downtimeAccum.get(server) ?? 0) + 1);
+        this.downtimeAccum.set(key, (this.downtimeAccum.get(key) ?? 0) + 1);
       }
     }
-    this.lastStateSeen.set(server, { state: stats.state, at: now });
+    this.lastStateSeen.set(key, { state: stats.state, at: now });
 
-    const lastTime = this.lastWrite.get(server) ?? 0;
+    const lastTime = this.lastWrite.get(key) ?? 0;
     if (now - lastTime < THROTTLE_MS) return;
 
-    this.lastWrite.set(server, now);
-    void this.record(server, serverOid, stats);
+    this.lastWrite.set(key, now);
+    void this.record(key, serverOid, stats);
   };
 
-  private async record(tag: string, serverOid: ObjectId, stats: ServerStatsPayload): Promise<void> {
+  private async record(key: string, serverOid: ObjectId, stats: ServerStatsPayload): Promise<void> {
     try {
       let tps = 0;
       let players = 0;
@@ -92,14 +92,14 @@ class StatsRecorder {
         }
       }
 
-      const uptimeDelta = this.uptimeAccum.get(tag) ?? 0;
-      const downtimeEvents = this.downtimeAccum.get(tag) ?? 0;
-      this.uptimeAccum.set(tag, 0);
-      this.downtimeAccum.set(tag, 0);
+      const uptimeDelta = this.uptimeAccum.get(key) ?? 0;
+      const downtimeEvents = this.downtimeAccum.get(key) ?? 0;
+      this.uptimeAccum.set(key, 0);
+      this.downtimeAccum.set(key, 0);
 
       const doc: StatsHistoryDocument = {
         timestamp: new Date(),
-        server: tag,
+        server: key,
         status: stats.state,
         cpu: Math.round(stats.cpu_absolute * 100) / 100,
         memoryBytes: stats.memory_bytes,
@@ -116,7 +116,7 @@ class StatsRecorder {
 
       await this.repo!.history.insertOne(doc);
     } catch (err) {
-      logger.error({ err, tag }, 'Failed to record stats history');
+      logger.error({ err, key }, 'Failed to record stats history');
     }
   }
 }
