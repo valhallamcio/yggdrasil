@@ -37,6 +37,9 @@ export const configSchema = z.object({
   DISCORD_CLIENT_ID: z.string().optional(),
   DISCORD_GUILD_ID: z.string().optional(),
 
+  DISCORD_WEBHOOK_USERNAME: z.string().default('Yggdrasil'),
+  DISCORD_WEBHOOK_AVATAR_URL: z.string().url().optional(),
+
   KOFI_VERIFICATION_TOKEN: z.string().optional(),
   PATREON_WEBHOOK_SECRET: z.string().optional(),
   DISCORD_DONATIONS_CHANNEL_ID: z.string().optional(),
@@ -47,6 +50,11 @@ export const configSchema = z.object({
   PTERODACTYL_URL: z.string().url().optional(),
   PTERODACTYL_API_KEY: z.string().optional(),
   DISCORD_SERVER_STATUS_CHANNEL_ID: z.string().optional(),
+
+  // Pterodactyl server ID of the Bifrost/Velocity proxy. Used to broadcast
+  // donations in-game via the `bc` command. The proxy is not a row in the
+  // `servers` collection, so it is addressed by its Pterodactyl ID directly.
+  PROXY_PTERODACTYL_SERVER_ID: z.string().optional(),
 
   VELOCITY_METRICS_URL: z.string().url().optional().or(z.literal('')),
 });

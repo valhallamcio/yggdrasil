@@ -23,6 +23,7 @@ export class DonationsController {
     await this.service.save(event);
     try {
       this.service.notifyDiscord(event);
+      this.service.broadcastInGame(event);
     } catch (err) {
       logger.error({ err, provider: event.provider }, 'Failed to dispatch donation notification');
     }
@@ -50,6 +51,7 @@ export class DonationsController {
     await this.service.save(event);
     try {
       this.service.notifyDiscord(event);
+      this.service.broadcastInGame(event);
     } catch (err) {
       logger.error({ err, provider: event.provider }, 'Failed to dispatch donation notification');
     }

@@ -7,6 +7,7 @@ import { kofiPayloadSchema } from './donations.schema.js';
 import type { DonationEvent } from './donations.types.js';
 import type { PatreonBody } from './donations.schema.js';
 import type { DonationsRepository } from './donations.repository.js';
+import { PterodactylClient } from '../servers/pterodactyl.client.js';
 
 const KOFI_PUBLIC_TYPES = new Set(['Donation', 'Subscription']);
 const PATREON_PUBLIC_EVENTS = new Set(['members:pledge:create']);
@@ -24,7 +25,17 @@ function camelToTitle(key: string): string {
     .trim();
 }
 
+/**
+ * Strips MiniMessage tag delimiters from user-controlled text so a donor name
+ * or message cannot inject active formatting/tags into an in-game broadcast.
+ */
+function escapeMiniMessage(text: string): string {
+  return text.replace(/[<>]/g, '');
+}
+
 export class DonationsService {
+  private readonly pterodactyl = new PterodactylClient();
+
   constructor(private readonly repo: DonationsRepository) {}
 
   async save(event: DonationEvent): Promise<void> {
@@ -185,6 +196,33 @@ export class DonationsService {
     return event.message ? `${base}\n> *${event.message}*` : base;
   }
 
+  /**
+   * Builds the MiniMessage payload (without the `bc ` prefix) for an in-game
+   * broadcast. Uses gradients and multiple lines for a polished look, and
+   * appends the donor's message when present. User-controlled fields (donor
+   * name, message) are escaped to prevent MiniMessage tag injection; `<newline>`
+   * is used (not a raw "\n") so the proxy console treats it as one command.
+   */
+  formatInGameMessage(event: DonationEvent): string {
+    const providerLabel = event.provider === 'kofi' ? 'Ko-fi' : 'Patreon';
+    const donor = escapeMiniMessage(event.donorName);
+    const amount = escapeMiniMessage(`${event.currency} ${event.amount}`);
+
+    const lines = [
+      `<gradient:#FFD700:#FFA500><bold>✦ Thank you for your support! ✦</bold></gradient>`,
+      `<white>${donor}</white> <gray>donated</gray> ` +
+        `<gradient:#55FF55:#00AA55><bold>${amount}</bold></gradient> ` +
+        `<gray>via</gray> <aqua>${providerLabel}</aqua><gray>!</gray>`,
+    ];
+
+    if (event.message) {
+      const message = escapeMiniMessage(event.message);
+      lines.push(`<gray>❝</gray> <italic><white>${message}</white></italic> <gray>❞</gray>`);
+    }
+
+    return lines.join('<newline>');
+  }
+
   formatLogMessage(event: DonationEvent): string {
     const providerLabel = event.provider === 'kofi' ? 'Ko-fi' : 'Patreon';
 
@@ -244,5 +282,26 @@ export class DonationsService {
         'No Discord channel configured for donation notification',
       );
     }
+  }
+
+  /**
+   * Broadcasts public donations to all online players via the proxy's `bc`
+   * command. Fire-and-forget: failures are logged but never propagate to the
+   * webhook acknowledgement. No-op unless the donation is public and the proxy's
+   * Pterodactyl server ID is configured.
+   */
+  broadcastInGame(event: DonationEvent): void {
+    if (!event.isPublic) return;
+
+    const proxyServerId = config.PROXY_PTERODACTYL_SERVER_ID;
+    if (!proxyServerId) {
+      logger.debug('PROXY_PTERODACTYL_SERVER_ID not configured — skipping in-game donation broadcast');
+      return;
+    }
+
+    const command = `bc ${this.formatInGameMessage(event)}`;
+    this.pterodactyl.sendCommand(proxyServerId, command).catch((err: unknown) => {
+      logger.error({ err, provider: event.provider }, 'Failed to broadcast donation in-game');
+    });
   }
 }
