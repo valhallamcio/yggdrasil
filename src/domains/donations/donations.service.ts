@@ -110,7 +110,10 @@ export class DonationsService {
 
   processPatreon(body: PatreonBody, eventType: string): DonationEvent {
     const attrs = body.data?.attributes;
-    const amountCents = attrs?.amount_cents ?? 0;
+    // Patreon `members:*` webhooks send a member resource, which has no
+    // `amount_cents` (that was the deprecated v1 pledge resource). The current
+    // pledge value lives in `currently_entitled_amount_cents`.
+    const amountCents = attrs?.currently_entitled_amount_cents ?? attrs?.amount_cents ?? 0;
     const currency = attrs?.currency ?? 'USD';
     const note = attrs?.note;
 
