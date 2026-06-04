@@ -32,6 +32,12 @@ export const configSchema = z.object({
 
   PLUGIN_DISCORD: booleanFromString.default('false'),
   PLUGIN_WEBSOCKET: booleanFromString.default('false'),
+  PLUGIN_BIFORESTING_LINK: booleanFromString.default('false'),
+
+  BIFORESTING_LINK_PORT: numberFromString('8765'),
+  BIFORESTING_LINK_HOST: z.string().default('0.0.0.0'),
+  BIFORESTING_PSK: z.string().optional(),
+  BIFORESTING_AUTHKEY_HEX: z.string().optional(),
 
   DISCORD_TOKEN: z.string().optional(),
   DISCORD_CLIENT_ID: z.string().optional(),
@@ -49,6 +55,14 @@ export const configSchema = z.object({
   DISCORD_SERVER_STATUS_CHANNEL_ID: z.string().optional(),
 
   VELOCITY_METRICS_URL: z.string().url().optional().or(z.literal('')),
+}).superRefine((data, ctx) => {
+  if (data.PLUGIN_BIFORESTING_LINK && !data.BIFORESTING_PSK && !data.BIFORESTING_AUTHKEY_HEX) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['BIFORESTING_PSK'],
+      message: 'PLUGIN_BIFORESTING_LINK=true requires BIFORESTING_PSK or BIFORESTING_AUTHKEY_HEX',
+    });
+  }
 });
 
 export type Config = z.output<typeof configSchema>;

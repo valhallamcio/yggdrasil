@@ -6,6 +6,10 @@ import { logger } from '../../core/logger/index.js';
 import { eventBus } from '../../core/event-bus/index.js';
 import { config } from '../../config/index.js';
 import { bifrostStateManager } from '../bifrost/state-manager.js';
+import { getAuthKey } from '../biforesting-link/auth-key.js';
+import { parseSingleOuterUnit, Reassembler } from '../biforesting-link/frame-codec.js';
+import { biforestingLinkManager } from '../biforesting-link/link-manager.js';
+import { processOuterUnit } from '../biforesting-link/session-processor.js';
 
 const SNAPSHOT_INTERVAL_MS = 30_000;
 
@@ -15,6 +19,10 @@ export class WebSocketPlugin implements Plugin {
   private wss: any;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private bifrostWss: any;
+  // Biforesting play-phase link over WS (path: /biforesting/). Only created when the link is enabled.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private biforestingWss: any;
+  private biforestingConnSeq = 0;
   private readonly consoleSubscriptions = new Map<string, Set<WebSocket>>();
   private snapshotInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -74,6 +82,18 @@ export class WebSocketPlugin implements Plugin {
     // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-assignment
     this.bifrostWss = new WebSocketServer({ noServer: true });
 
+    // ── Biforesting play-phase link over WS (path: /biforesting/) ────────────
+    // Carries the same HMAC-signed frames as the raw-TCP link, over the existing HTTPS port.
+    // Only stood up when the link is enabled, so `ws`-only deployments don't pull in its deps.
+    if (config.PLUGIN_BIFORESTING_LINK) {
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-assignment
+      this.biforestingWss = new WebSocketServer({ noServer: true });
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+      this.biforestingWss.on('connection', (ws: WebSocket, req: import('http').IncomingMessage) => {
+        this.handleBiforestingLink(ws, req);
+      });
+    }
+
     // Route HTTP upgrade requests to the correct WSS by pathname.
     // Using noServer on both instances avoids ws's built-in path check calling
     // abortHandshake(400) on requests destined for the other server.
@@ -84,6 +104,14 @@ export class WebSocketPlugin implements Plugin {
         this.bifrostWss.handleUpgrade(req, socket, head, (ws: WebSocket) => {
           // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
           this.bifrostWss.emit('connection', ws, req);
+        });
+      } else if (pathname === '/biforesting/' && this.biforestingWss) {
+        // No `?token=` gate here: the play-phase link authenticates by per-frame HMAC, exactly
+        // like the raw-TCP listener — a connection whose frames don't verify simply sends nothing.
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+        this.biforestingWss.handleUpgrade(req, socket, head, (ws: WebSocket) => {
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+          this.biforestingWss.emit('connection', ws, req);
         });
       } else if (pathname === '/') {
         // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
@@ -189,6 +217,23 @@ export class WebSocketPlugin implements Plugin {
       this.broadcast({ type: 'player.chat', payload });
     });
 
+    // ── Biforesting play-phase link events ───────────────────────────────────
+    eventBus.on('biforesting.link.connected', (payload) => {
+      this.broadcast({ type: 'biforesting.link.connected', payload });
+    });
+
+    eventBus.on('biforesting.link.disconnected', (payload) => {
+      this.broadcast({ type: 'biforesting.link.disconnected', payload });
+    });
+
+    eventBus.on('biforesting.link.metrics', (payload) => {
+      this.broadcast({ type: 'biforesting.link.metrics', payload });
+    });
+
+    eventBus.on('biforesting.link.data', (payload) => {
+      this.broadcast({ type: 'biforesting.link.data', payload });
+    });
+
     // ── Console channel (per-server subscriptions) ────────────────────────────
     eventBus.on('server.console.output', ({ server, line }) => {
       const subscribers = this.consoleSubscriptions.get(server);
@@ -229,8 +274,82 @@ export class WebSocketPlugin implements Plugin {
         (wss as any).close((err: Error | undefined) => (err ? reject(err) : resolve()));
       });
 
-    await Promise.all([closeWss(this.wss), closeWss(this.bifrostWss)]);
+    await Promise.all([closeWss(this.wss), closeWss(this.bifrostWss), closeWss(this.biforestingWss)]);
     logger.info({ plugin: this.name }, 'WebSocket server closed');
+  }
+
+  // ── Biforesting play-phase link (WS transport) ───────────────────────────
+
+  /**
+   * Handle one `/biforesting/` WebSocket: a backend mod's play-phase link over the existing HTTPS
+   * port (the WS twin of the raw-TCP listener in `biforesting-link/index.ts`). One WS connection per
+   * backend; each binary message is EXACTLY one outer unit `[uint16 chanLen][channel][int32 frameLen]
+   * [frame]`, so there's no cross-read reassembly of the outer framing — the message boundary is the
+   * unit boundary. Past the unit parse it's the identical decode→HMAC→reassemble→dispatch pipeline
+   * (`processOuterUnit`), and DOWN/`reg_ack` flow back via the same `LinkTransport` abstraction.
+   */
+  private handleBiforestingLink(ws: WebSocket, req: import('http').IncomingMessage): void {
+    const remote = req.socket.remoteAddress ?? '?';
+    const sessionId = `ws:${remote}#${++this.biforestingConnSeq}`;
+    const wsLogger = logger.child({ plugin: 'websocket/biforesting', sessionId, ip: remote });
+
+    let authKey: Buffer;
+    try {
+      authKey = getAuthKey(); // missing/malformed PSK → refuse the link rather than accept unauthenticated
+    } catch (err) {
+      wsLogger.error({ err }, 'biforesting-link(ws): auth key unavailable — closing');
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+      ws.close(1011, 'link unavailable');
+      return;
+    }
+
+    const reassembler = new Reassembler();
+
+    // WS uses the same transport-agnostic session as TCP; DOWN goes out as a single binary message.
+    biforestingLinkManager.registerSession(
+      sessionId,
+      {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+        writable: () => (ws as unknown as { readyState: number }).readyState === 1 /* OPEN */,
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+        send: (outerUnit) => (ws as unknown as { send: (b: Buffer) => void }).send(outerUnit),
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+        close: () => (ws as unknown as { close: () => void }).close(),
+      },
+      remote,
+    );
+    wsLogger.info('biforesting-link(ws): connection opened');
+
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+    ws.on('message', (raw: Buffer, isBinary: boolean) => {
+      if (!isBinary) {
+        wsLogger.warn('biforesting-link(ws): non-binary message — dropping connection');
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+        ws.close(1003, 'binary only');
+        return;
+      }
+      const data = Buffer.isBuffer(raw) ? raw : Buffer.from(raw as ArrayLike<number>);
+      biforestingLinkManager.noteBytes(sessionId, data.length);
+
+      let unit;
+      try {
+        unit = parseSingleOuterUnit(data); // one message == one unit (no outer-frame reassembly)
+      } catch (err) {
+        wsLogger.warn({ err }, 'biforesting-link(ws): malformed outer unit — dropping connection');
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+        ws.close(1002, 'bad frame');
+        return;
+      }
+      processOuterUnit(sessionId, unit, reassembler, Date.now(), authKey);
+    });
+
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+    ws.on('close', () => {
+      wsLogger.info('biforesting-link(ws): connection closed');
+      biforestingLinkManager.removeSession(sessionId);
+    });
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+    ws.on('error', (err: unknown) => wsLogger.debug({ err }, 'biforesting-link(ws): socket error'));
   }
 
   // ── Dashboard message handling ───────────────────────────────────────────

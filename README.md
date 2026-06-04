@@ -51,6 +51,11 @@ Create a `.env` file in the project root. Required variables are marked with **b
 | `VELOCITY_METRICS_URL` | — | Velocity Prometheus metrics endpoint (legacy, optional) |
 | `PLUGIN_DISCORD` | `false` | Enable Discord plugin |
 | `PLUGIN_WEBSOCKET` | `false` | Enable WebSocket plugin |
+| `PLUGIN_BIFORESTING_LINK` | `false` | Enable the Biforesting play-phase TCP link |
+| `BIFORESTING_LINK_PORT` | `8765` | Port the backend mods dial into |
+| `BIFORESTING_LINK_HOST` | `0.0.0.0` | Bind host for the link listener |
+| `BIFORESTING_PSK` | — | Shared PSK (same value the mod was built with); derives the HMAC authKey. Required when the plugin is enabled (unless `BIFORESTING_AUTHKEY_HEX` is set) |
+| `BIFORESTING_AUTHKEY_HEX` | — | Pre-derived 64-hex authKey, overrides the PSK derivation |
 | `DISCORD_TOKEN` | — | Discord bot token |
 | `DISCORD_CLIENT_ID` | — | Discord application client ID |
 | `DISCORD_GUILD_ID` | — | Discord server/guild ID |
@@ -102,6 +107,7 @@ src/
 │   ├── servers/               # Server metadata, Pterodactyl integration, stats
 │   ├── players/               # Player profiles, metrics, sessions, analytics
 │   ├── showcase/              # Screenshot gallery from Discord
+│   ├── biforesting/           # Play-phase link status + DOWN push endpoints
 │   └── donations/             # Ko-fi & Patreon webhook processing
 ├── middleware/
 │   ├── auth/                  # JWT & API key authentication
@@ -112,7 +118,8 @@ src/
 ├── plugins/
 │   ├── discord/               # Discord bot integration
 │   ├── websocket/             # WebSocket server (dashboard + Bifrost endpoints)
-│   └── bifrost/               # Bifrost proxy state manager (player presence)
+│   ├── bifrost/               # Bifrost proxy state manager (player presence)
+│   └── biforesting-link/      # Raw-TCP play-phase link (codec, sessions, persistence)
 ├── repositories/
 │   └── base.repository.ts     # Generic CRUD base class
 ├── router/
@@ -181,6 +188,18 @@ Health check: `GET /health` (returns 200 or 503)
 | POST | `/kofi` | None | — | Ko-fi webhook (token-verified) |
 | POST | `/patreon` | None | — | Patreon webhook (HMAC-verified) |
 
+### Biforesting Link `/v1/biforesting`
+
+Observability + control for the raw-TCP play-phase link (see the Plugins section). Returns sensible
+empty/`listening:false` data when `PLUGIN_BIFORESTING_LINK` is off.
+
+| Method | Path | Auth | Body | Description |
+|---|---|---|---|---|
+| GET | `/link` | API Key | — | Snapshot of all live link sessions (identity, metrics, counts) |
+| GET | `/link/:server` | API Key | — | One session by link serverId / Pterodactyl serverId / tag / instanceKey |
+| POST | `/:server/quest` | API Key | `{ teams: [{ teamId, dataVersion, snbt }] }` | Push authoritative quest progress (DOWN). Rejected unless every `dataVersion` matches the server's last-seen UP version (no DataFixerUpper in Node) |
+| POST | `/:server/chunks` | API Key | `{ teams: [{ teamId, claims: [{ dimension, x, z, force }] }] }` | Push a desired land-claim set (DOWN, reconcile-to-desired) |
+
 ## Plugins
 
 Plugins are loaded conditionally when their `PLUGIN_*` env var is set to `true`.
@@ -208,6 +227,30 @@ Attaches two WebSocket servers to the HTTP server, both authenticating via `?tok
 **Client commands:** `console.subscribe` / `console.unsubscribe` for per-server console streaming.
 
 **Inbound Bifrost message types:** `player.joined`, `player.left`, `player.server.changed`, `player.list.updated`, `player.message`, `player.position`, `player.inventory`
+
+When `PLUGIN_BIFORESTING_LINK` is enabled, the dashboard WS also broadcasts `biforesting.link.connected`, `biforesting.link.disconnected`, `biforesting.link.metrics`, and `biforesting.link.data`.
+
+### Biforesting Link (`PLUGIN_BIFORESTING_LINK`)
+
+A **standalone raw-TCP listener** (default port `8765`, separate from the WebSocket above) that backend
+**Biforesting** mods dial into directly to stream server-global data. The mod connects only when
+`BIFORESTING_YGGDRASIL_HOST/_PORT/_SERVER_ID` are configured on the server; set
+`BIFORESTING_YGGDRASIL_SERVER_ID` to the **Pterodactyl serverId** so multi-instance modpacks resolve
+per-instance (falls back to tag, then the raw id).
+
+Every frame is HMAC-SHA256 authenticated with the same PSK-derived key as Bifrost proxy-auth
+(`PBKDF2(BIFORESTING_PSK, "Biforesting-ProxyAuth-v1", 10000, 32, sha256)`). Channels:
+
+- `metrics` (~1 Hz) — mspt/tps/players/heap; **observability only** for now (not yet fed into server stats).
+- `registry` (once on connect) — item id → numericId map; persisted to `biforesting_registry`.
+- `quest` (UP on change; DOWN authoritative) — per-team SNBT; persisted to `biforesting_quests`.
+- `chunks` (UP on change; DOWN authoritative) — per-team land claims; persisted to `biforesting_chunks`.
+
+> **Security:** the link is plaintext TCP — HMAC provides integrity/authenticity, not confidentiality.
+> Firewall `BIFORESTING_LINK_PORT` to backend hosts only and keep the PSK secret.
+
+Protocol spec: `Bifrost/docs/biforesting-protocol.md` §"Play-Phase Transport". Reference decoder:
+`bifrost-lib/test/ygg_mock.py`.
 
 ## Scheduler Jobs
 

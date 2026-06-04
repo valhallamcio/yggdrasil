@@ -29,7 +29,11 @@ export type AppEvent =
   | { type: 'player.left'; payload: { username: string; uuid: string; ip: string; server: string } }
   | { type: 'player.server.changed'; payload: { username: string; uuid: string; ip: string; previousServer: string; currentServer: string } }
   | { type: 'player.list.updated'; payload: { servers: Record<string, Array<{ username: string; ping: number }>>; count: number } }
-  | { type: 'player.chat'; payload: { username: string; uuid: string; server: string; message: string } };
+  | { type: 'player.chat'; payload: { username: string; uuid: string; server: string; message: string } }
+  | { type: 'biforesting.link.connected'; payload: { sessionId: string; linkServerId: string; tag: string | null; instanceKey: string; name: string | null; serverId: string | null; resolved: boolean; remote: string } }
+  | { type: 'biforesting.link.disconnected'; payload: { sessionId: string; linkServerId: string | null; instanceKey: string | null } }
+  | { type: 'biforesting.link.metrics'; payload: { instanceKey: string; tag: string | null; serverId: string | null; mspt: number; tps: number; players: number; levels: number; loadedChunks: number; heapUsed: number; heapMax: number } }
+  | { type: 'biforesting.link.data'; payload: { instanceKey: string; tag: string | null; serverId: string | null; channel: 'registry' | 'quest' | 'chunks'; count: number } };
 
 export type AppEventType = AppEvent['type'];
 export type AppEventPayload<T extends AppEventType> = Extract<AppEvent, { type: T }>['payload'];

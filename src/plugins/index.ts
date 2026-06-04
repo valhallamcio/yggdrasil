@@ -43,4 +43,8 @@ export async function loadPlugins(): Promise<void> {
     const { DiscordPlugin } = await import('./discord/index.js');
     pluginRegistry.register(new DiscordPlugin());
   }
+  if (config.PLUGIN_BIFORESTING_LINK) {
+    const { BiforestingLinkPlugin } = await import('./biforesting-link/index.js');
+    pluginRegistry.register(new BiforestingLinkPlugin());
+  }
 }
