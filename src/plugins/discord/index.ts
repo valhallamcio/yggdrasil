@@ -13,7 +13,7 @@ const WEBHOOK_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
 /** Minimal interface for what we use from a discord.js Webhook. */
 interface DiscordWebhook {
   token: string | null;
-  send(message: { content: string; username?: string }): Promise<unknown>;
+  send(message: { content: string; username?: string; avatarURL?: string }): Promise<unknown>;
 }
 
 /** Minimal interface for what we use from a discord.js TextChannel. */
@@ -91,13 +91,25 @@ export class DiscordPlugin implements Plugin {
         channelId,
         `**${serverName}** (\`${server}\`) ${labels[reason] ?? 'encountered an issue'} (${previousState} → ${currentState})`,
       );
+
+      // Public channel: generic, friendly wording (no internal state leak).
+      this.postPublic(`⚠️ **${serverName}** went offline unexpectedly. We're on it!`, server);
     });
 
     eventBus.on('server.recovered', ({ server, serverName }) => {
       const channelId = config.DISCORD_SERVER_STATUS_CHANNEL_ID;
-      if (!channelId) return;
-      if (this.crashLoopServers.has(server)) return;
-      void this.sendMessage(channelId, `**${serverName}** (\`${server}\`) is back online.`);
+      if (channelId && !this.crashLoopServers.has(server)) {
+        void this.sendMessage(channelId, `**${serverName}** (\`${server}\`) is back online.`);
+      }
+      this.postPublic(`🟢 **${serverName}** is back online.`, server);
+    });
+
+    eventBus.on('server.started', ({ server, serverName }) => {
+      this.postPublic(`🟢 **${serverName}** is now online!`, server);
+    });
+
+    eventBus.on('server.stopped', ({ server, serverName }) => {
+      this.postPublic(`🔴 **${serverName}** has been stopped.`, server);
     });
 
     eventBus.on('server.crash-loop.started', ({ server, serverName, crashCount }) => {
@@ -112,6 +124,24 @@ export class DiscordPlugin implements Plugin {
       const channelId = config.DISCORD_SERVER_STATUS_CHANNEL_ID;
       if (!channelId) return;
       void this.sendMessage(channelId, `**${serverName}** (\`${server}\`) is no longer crash looping.`);
+    });
+  }
+
+  /**
+   * Posts a friendly, branded announcement to the public server-status channel.
+   * Suppressed during a crash loop (same `crashLoopServers` guard as the staff
+   * path) so a flapping server doesn't spam the public channel.
+   */
+  private postPublic(content: string, serverTag: string): void {
+    const channelId = config.DISCORD_SERVER_STATUS_PUBLIC_CHANNEL_ID;
+    if (!channelId) return;
+    if (this.crashLoopServers.has(serverTag)) return;
+    // Distinct identity for status posts; avatar falls back to the generic
+    // webhook avatar / bot avatar inside sendWebhook when unset.
+    void this.sendWebhook(channelId, {
+      content,
+      username: config.DISCORD_SERVER_STATUS_WEBHOOK_USERNAME,
+      avatarURL: config.DISCORD_SERVER_STATUS_WEBHOOK_AVATAR_URL,
     });
   }
 
@@ -130,13 +160,24 @@ export class DiscordPlugin implements Plugin {
 
   async sendWebhook(
     channelId: string,
-    message: { content: string; username?: string }
+    message: { content: string; username?: string; avatarURL?: string }
   ): Promise<void> {
     if (!this.client) return;
     try {
       const webhook = await this.getWebhook(channelId);
       if (!webhook) return;
-      await webhook.send(message);
+      // Always pin a fixed brand identity per-message. Without this, Discord
+      // renders the post using the webhook's stored name/avatar (whatever it was
+      // last named), which often looks wrong.
+      await webhook.send({
+        ...message,
+        username: message.username ?? config.DISCORD_WEBHOOK_USERNAME,
+        avatarURL:
+          message.avatarURL ??
+          config.DISCORD_WEBHOOK_AVATAR_URL ??
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+          (this.client.user?.displayAvatarURL() as string | undefined),
+      });
     } catch (err) {
       logger.error({ err, channelId }, 'Failed to send Discord webhook message');
     }

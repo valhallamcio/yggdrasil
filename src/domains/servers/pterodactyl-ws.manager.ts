@@ -20,10 +20,13 @@ interface PterodactylWsEvent {
 
 const MAX_RECONNECT_ATTEMPTS = 5;
 const BASE_RECONNECT_DELAY_MS = 1_000;
+const MAX_RECONNECT_DELAY_MS = 60_000; // cap exponential backoff; keep retrying past MAX_RECONNECT_ATTEMPTS
 const STUCK_STARTING_TIMEOUT_MS = 10 * 60_000; // 10 minutes
 const STUCK_STOPPING_TIMEOUT_MS = 5 * 60_000;  // 5 minutes
 const CRASH_LOOP_THRESHOLD = 3;
 const CRASH_LOOP_WINDOW_MS = 15 * 60_000; // 15 minutes
+const CONSOLE_CRASH_FLAG_TTL_MS = 30_000; // auto-expire so a stale flag can't suppress a future real crash
+const CRASH_REPORT_FRESH_MS = 120_000; // a crash-reports file this recent corroborates a console marker
 
 /** Map of "previousState:newState" → anomaly definition. Only anomalous transitions are listed. */
 const ANOMALOUS_TRANSITIONS: Record<string, { reason: string; logLevel: 'warn' | 'info'; message: string }> = {
@@ -47,7 +50,11 @@ class PterodactylWsManager {
   private readonly crashTimestamps = new Map<string, number[]>();
   private readonly crashLoopFlags = new Set<string>();
   private readonly crashLoopCooldowns = new Map<string, NodeJS.Timeout>();
-  private readonly consoleCrashFlags = new Set<string>();
+  // TTL'd: set on a confirmed console crash to dedupe the following status transition (non-Cleanroom servers).
+  private readonly consoleCrashFlags = new Map<string, NodeJS.Timeout>();
+  // Console-crash confirmation against crash-reports/: avoids re-checking/re-reporting the same report.
+  private readonly lastCrashReport = new Map<string, string>();
+  private readonly consoleCheckInFlight = new Set<string>();
   private readonly pterodactyl = new PterodactylClient();
   private shuttingDown = false;
 
@@ -122,7 +129,10 @@ class PterodactylWsManager {
     this.crashLoopCooldowns.clear();
     this.crashLoopFlags.clear();
     this.crashTimestamps.clear();
+    for (const timer of this.consoleCrashFlags.values()) clearTimeout(timer);
     this.consoleCrashFlags.clear();
+    this.lastCrashReport.clear();
+    this.consoleCheckInFlight.clear();
     for (const id of [...this.connections.keys()]) {
       this.disconnectServer(id);
     }
@@ -211,7 +221,9 @@ class PterodactylWsManager {
     this.crashLoopCooldowns.delete(serverId);
     this.crashLoopFlags.delete(serverId);
     this.crashTimestamps.delete(serverId);
-    this.consoleCrashFlags.delete(serverId);
+    this.clearConsoleCrashFlag(serverId);
+    this.lastCrashReport.delete(serverId);
+    this.consoleCheckInFlight.delete(serverId);
     this.statsCache.delete(serverId);
     this.statusCache.delete(serverId);
     this.serverLookup.delete(serverId);
@@ -223,6 +235,77 @@ class PterodactylWsManager {
     if (timer) {
       clearTimeout(timer);
       this.stuckTimers.delete(serverId);
+    }
+  }
+
+  // ── Console crash flag (TTL'd) ─────────────────────────────────────────────
+  // Set on a confirmed console crash so the following `running:offline` status
+  // transition is not reported twice. TTL'd because Cleanroom crashes never
+  // produce that transition, so a flag without a TTL would go stale and suppress
+  // the next real crash.
+  private setConsoleCrashFlag(serverId: string): void {
+    this.clearConsoleCrashFlag(serverId);
+    this.consoleCrashFlags.set(serverId, setTimeout(() => {
+      this.consoleCrashFlags.delete(serverId);
+    }, CONSOLE_CRASH_FLAG_TTL_MS));
+  }
+
+  private clearConsoleCrashFlag(serverId: string): void {
+    const timer = this.consoleCrashFlags.get(serverId);
+    if (timer) {
+      clearTimeout(timer);
+      this.consoleCrashFlags.delete(serverId);
+    }
+  }
+
+  private hasConsoleCrashFlag(serverId: string): boolean {
+    return this.consoleCrashFlags.has(serverId);
+  }
+
+  /**
+   * Confirms a console crash marker by checking the server's `crash-reports/`
+   * directory for a freshly-written report. This is the only reliable signal for
+   * Cleanroom (Forge) crashes, which restart the JVM in-process so Pterodactyl's
+   * status never changes. It also rejects phantom markers — chat, `say`, plugin
+   * output, or viewing an old report — which never produce a new report file.
+   * Fire-and-forget: API errors are logged, never thrown into the WS message loop.
+   */
+  private async confirmConsoleCrash(serverId: string, entry: ServerEntry): Promise<void> {
+    // One crash prints many matching lines; only one file-listing per burst.
+    if (this.consoleCheckInFlight.has(serverId)) return;
+    this.consoleCheckInFlight.add(serverId);
+    try {
+      const files = await this.pterodactyl.listFiles(serverId, '/crash-reports');
+      const reports = files
+        .map((f) => f.attributes)
+        .filter((a) => a.is_file && a.name.endsWith('.txt'));
+      if (reports.length === 0) return;
+
+      const newest = reports.reduce((a, b) => (a.created_at > b.created_at ? a : b));
+      const ageMs = Date.now() - new Date(newest.created_at).getTime();
+      if (ageMs > CRASH_REPORT_FRESH_MS) return; // stale report (e.g. viewing an old file)
+      if (this.lastCrashReport.get(serverId) === newest.name) return; // already reported this crash
+
+      this.lastCrashReport.set(serverId, newest.name);
+      const currentState = this.statusCache.get(serverId) ?? 'unknown';
+      logger.warn(
+        { tag: entry.tag, serverId, name: entry.name, report: newest.name, currentState },
+        'Crash confirmed via crash-reports',
+      );
+      this.setConsoleCrashFlag(serverId);
+      eventBus.emit('server.crashed', {
+        server: entry.tag,
+        serverName: entry.name,
+        previousState: currentState,
+        currentState,
+        reason: 'console-crash',
+        serverId: entry.serverId,
+      });
+      this.recordCrash(serverId, entry);
+    } catch (err) {
+      logger.debug({ err, tag: entry.tag, serverId }, 'Could not confirm console crash via crash-reports');
+    } finally {
+      this.consoleCheckInFlight.delete(serverId);
     }
   }
 
@@ -345,6 +428,20 @@ class PterodactylWsManager {
           serverId: entry.serverId,
           instanceKey: this.instanceKey(entry),
         });
+
+        // Repair statusCache from the stats `state` field. Stats arrive every few
+        // seconds, so a dropped `status` event would otherwise leave the cache
+        // stale and misclassify the next transition. Replay any disagreement
+        // through the status branch so anomaly/recovery logic runs exactly once.
+        const observed = stats.state;
+        if (observed) {
+          const cached = this.statusCache.get(serverId);
+          if (cached === undefined) {
+            this.statusCache.set(serverId, observed); // seed baseline silently
+          } else if (observed !== cached) {
+            this.handleEvent(serverId, { event: 'status', args: [observed] });
+          }
+        }
         break;
       }
 
@@ -368,8 +465,8 @@ class PterodactylWsManager {
 
         const anomaly = ANOMALOUS_TRANSITIONS[`${previousState}:${newState}`];
         if (anomaly) {
-          if (this.consoleCrashFlags.has(serverId)) {
-            this.consoleCrashFlags.delete(serverId);
+          if (this.hasConsoleCrashFlag(serverId)) {
+            this.clearConsoleCrashFlag(serverId); // console path already reported this crash
           } else {
             logger[anomaly.logLevel]({ tag: entry.tag, serverId, name: entry.name, previousState, newState, reason: anomaly.reason }, anomaly.message);
             eventBus.emit('server.crashed', {
@@ -385,7 +482,7 @@ class PterodactylWsManager {
         }
 
         if ((previousState === 'offline' || previousState === 'unknown') && newState === 'running') {
-          this.consoleCrashFlags.delete(serverId);
+          this.clearConsoleCrashFlag(serverId);
           logger.info({ tag: entry.tag, serverId, name: entry.name }, 'Server recovered');
           eventBus.emit('server.recovered', {
             server: entry.tag,
@@ -393,6 +490,26 @@ class PterodactylWsManager {
             serverId: entry.serverId,
           });
           this.handleRecoveryCrashLoop(serverId, entry);
+        }
+
+        // Public-facing lifecycle signals (consumed by the Discord plugin). A
+        // fresh start is `starting -> running` (distinct from crash recovery
+        // above); a clean stop is `stopping -> offline` (intentionally not an
+        // anomalous transition).
+        if (previousState === 'starting' && newState === 'running') {
+          eventBus.emit('server.started', {
+            server: entry.tag,
+            serverName: entry.name,
+            serverId: entry.serverId,
+          });
+        }
+
+        if (previousState === 'stopping' && newState === 'offline') {
+          eventBus.emit('server.stopped', {
+            server: entry.tag,
+            serverName: entry.name,
+            serverId: entry.serverId,
+          });
         }
 
         if (newState === 'starting' || newState === 'stopping') {
@@ -427,18 +544,12 @@ class PterodactylWsManager {
           cleanLine.includes('Considering it to be crashed, server will forcibly shutdown.') ||
           cleanLine.includes('---- Minecraft Crash Report ----')
         ) {
-          const currentState = this.statusCache.get(serverId) ?? 'unknown';
-          logger.warn({ tag: entry.tag, serverId, name: entry.name, currentState }, 'Crash detected from console output');
-          this.consoleCrashFlags.add(serverId);
-          eventBus.emit('server.crashed', {
-            server: entry.tag,
-            serverName: entry.name,
-            previousState: currentState,
-            currentState,
-            reason: 'console-crash',
-            serverId: entry.serverId,
-          });
-          this.recordCrash(serverId, entry);
+          // The marker alone is unreliable (chat, `say`, plugins, viewing an old
+          // report, Cleanroom soft-restart noise). Confirm against a freshly
+          // written crash-reports file before emitting. This also catches
+          // Cleanroom crashes, where the process restarts in-place and the
+          // Pterodactyl status never changes.
+          void this.confirmConsoleCrash(serverId, entry);
         }
 
         eventBus.emit('server.console.output', { server: entry.tag, line, serverId: entry.serverId });
@@ -480,16 +591,18 @@ class PterodactylWsManager {
 
   private scheduleReconnect(serverId: string): void {
     const attempts = this.reconnectAttempts.get(serverId) ?? 0;
-    if (attempts >= MAX_RECONNECT_ATTEMPTS) {
-      const entry = this.serverLookup.get(serverId);
-      logger.error({ tag: entry?.tag, serverId, attempts }, 'Max reconnect attempts reached, giving up');
-      this.reconnectAttempts.delete(serverId);
-      return;
-    }
-
-    const delay = BASE_RECONNECT_DELAY_MS * Math.pow(2, attempts);
-    this.reconnectAttempts.set(serverId, attempts + 1);
     const entry = this.serverLookup.get(serverId);
+
+    // Exponential backoff capped at MAX_RECONNECT_DELAY_MS. We never permanently
+    // give up — a dead connection means no crash detection for that server, and
+    // the only other recovery (the server-sync refresh) runs just every 10 min.
+    // `reconnectAttempts` resets to 0 on a successful `ws.open`.
+    const delay = Math.min(BASE_RECONNECT_DELAY_MS * Math.pow(2, attempts), MAX_RECONNECT_DELAY_MS);
+    this.reconnectAttempts.set(serverId, attempts + 1);
+
+    if (attempts === MAX_RECONNECT_ATTEMPTS) {
+      logger.warn({ tag: entry?.tag, serverId, attempts }, 'Reconnect attempts exhausted, continuing with capped backoff');
+    }
     logger.info({ tag: entry?.tag, serverId, attempt: attempts + 1, delayMs: delay }, 'Scheduling reconnect');
 
     setTimeout(() => {
