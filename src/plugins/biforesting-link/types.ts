@@ -54,6 +54,8 @@ export interface RegisterInfo {
   node: string;
   /** Player-facing game address (host:port). */
   gameAddr: string;
+  /** Link semantics version the mod speaks (1 = feat-era, 2 = policy-gated). */
+  linkProtocolVersion: number;
   /**
    * Per-boot nonce. May exceed JS safe-int range, so it is kept as a string
    * (decoded via `Reader.long()` → BigInt → `.toString()`); never coerced to Number.
@@ -71,6 +73,8 @@ export interface RegAck {
   questHz: number;
   chunkHz: number;
   serverTimeMillis: number;
+  /** min(mod's linkProtocolVersion, ours). */
+  negotiatedVersion: number;
 }
 
 // ── Resolved identity of a connected backend ─────────────────────────────────

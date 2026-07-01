@@ -1,8 +1,10 @@
 import type { Request, Response } from 'express';
 import { biforestingLinkManager } from '../../plugins/biforesting-link/link-manager.js';
 import { encodeQuestDown, encodeChunksDown } from '../../plugins/biforesting-link/decoders.js';
+import { getPolicy, setPolicy, maskForFeatures, featureNamesForMask } from '../../plugins/biforesting-link/policy-store.js';
+import { serverResolver } from '../../plugins/biforesting-link/server-resolver.js';
 import { NotFoundError, ValidationError } from '../../shared/errors/index.js';
-import type { LinkServerParams, QuestDownBody, ChunksDownBody } from './biforesting.schema.js';
+import type { LinkServerParams, PolicyPutBody, QuestDownBody, ChunksDownBody } from './biforesting.schema.js';
 
 const QUEST_CHANNEL = 'biforesting:quest';
 const CHUNKS_CHANNEL = 'biforesting:chunks';
@@ -19,6 +21,59 @@ export class BiforestingController {
     const session = biforestingLinkManager.getSessionSnapshot(server);
     if (!session) throw new NotFoundError('Link session', server);
     res.json({ data: session });
+  };
+
+  /** The stored link policy for a server (ZERO for unknown — features default off). */
+  getPolicy = async (req: Request, res: Response): Promise<void> => {
+    const { server } = req.params as unknown as LinkServerParams;
+    const identity = await serverResolver.resolve(server);
+    const policy = await getPolicy(identity.instanceKey);
+    res.json({
+      data: {
+        instanceKey: identity.instanceKey,
+        resolved: identity.resolved,
+        ...policy,
+        features: featureNamesForMask(policy.enabledFeatures),
+        liveSession: !!biforestingLinkManager.getSessionByServer(server),
+      },
+    });
+  };
+
+  /**
+   * Upsert the link policy and, when the backend has a live session, re-send reg_ack so the
+   * change applies IMMEDIATELY (per-server kill switch / grant without redeploy or reconnect).
+   */
+  putPolicy = async (req: Request, res: Response): Promise<void> => {
+    const { server } = req.params as unknown as LinkServerParams;
+    const body = req.body as PolicyPutBody;
+
+    const identity = await serverResolver.resolve(server);
+    if (!identity.resolved) {
+      throw new ValidationError(`Unknown server '${server}' — policy must target a resolvable server`);
+    }
+
+    const fields: { enabledFeatures?: number; metricsHz?: number; questHz?: number; chunkHz?: number } = {};
+    if (body.features !== undefined) fields.enabledFeatures = maskForFeatures(body.features);
+    if (body.enabledFeatures !== undefined) fields.enabledFeatures = body.enabledFeatures;
+    if (body.metricsHz !== undefined) fields.metricsHz = body.metricsHz;
+    if (body.questHz !== undefined) fields.questHz = body.questHz;
+    if (body.chunkHz !== undefined) fields.chunkHz = body.chunkHz;
+    if (Object.keys(fields).length === 0) throw new ValidationError('No policy fields to update');
+
+    const actor = (req.headers['x-actor'] as string | undefined) ?? 'api';
+    const doc = await setPolicy(identity.instanceKey, fields, actor);
+    const reAcked = await biforestingLinkManager.resendRegAck(server);
+    res.json({
+      data: {
+        instanceKey: identity.instanceKey,
+        enabledFeatures: doc.enabledFeatures,
+        features: featureNamesForMask(doc.enabledFeatures),
+        metricsHz: doc.metricsHz,
+        questHz: doc.questHz,
+        chunkHz: doc.chunkHz,
+        reAcked,
+      },
+    });
   };
 
   /**

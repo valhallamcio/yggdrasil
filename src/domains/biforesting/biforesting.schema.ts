@@ -35,6 +35,23 @@ export const chunksDownBodySchema = z.object({
     .min(1),
 });
 
+/**
+ * Policy PUT body: grant features by NAME (see policy-store FEATURE_BITS) or as a raw bitmask;
+ * exactly one of the two. Cadences are optional Hz fields consumed by the mod's features.
+ */
+export const policyPutBodySchema = z
+  .object({
+    features: z.array(z.string().min(1)).optional(),
+    enabledFeatures: z.number().int().nonnegative().optional(),
+    metricsHz: z.number().int().min(0).max(20).optional(),
+    questHz: z.number().int().min(0).max(20).optional(),
+    chunkHz: z.number().int().min(0).max(20).optional(),
+  })
+  .refine((b) => (b.features !== undefined) !== (b.enabledFeatures !== undefined) || (b.features === undefined && b.enabledFeatures === undefined), {
+    message: 'provide features[] OR enabledFeatures, not both',
+  });
+
 export type LinkServerParams = z.infer<typeof linkServerParamsSchema>;
+export type PolicyPutBody = z.infer<typeof policyPutBodySchema>;
 export type QuestDownBody = z.infer<typeof questDownBodySchema>;
 export type ChunksDownBody = z.infer<typeof chunksDownBodySchema>;

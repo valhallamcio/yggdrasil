@@ -80,29 +80,32 @@ export function decodeChunks(payload: Buffer): ChunkTeam[] {
  */
 export function decodeRegister(payload: Buffer): RegisterInfo {
   const r = new Reader(payload);
-  r.varInt(); // version
+  const ver = r.varInt(); // message-format version: 1 (feat-era) or 2 (+linkProtocolVersion)
   const serverId = r.utf();
   const friendlyHint = r.utf();
   const capabilities = r.varInt();
   const node = r.utf();
   const gameAddr = r.utf();
   const bootNonce = r.long().toString();
-  return { serverId, friendlyHint, capabilities, node, gameAddr, bootNonce };
+  const linkProtocolVersion = ver >= 2 ? r.varInt() : 1;
+  return { serverId, friendlyHint, capabilities, node, gameAddr, bootNonce, linkProtocolVersion };
 }
 
 // ── DOWN encoders (authoritative pushes) ─────────────────────────────────────
 
 /**
- * Encode `biforesting:reg_ack`:
- *   [varint ver=1][byte accepted(1/0)][utf canonicalServerId][utf friendlyName]
+ * Encode `biforesting:reg_ack` (v2):
+ *   [varint ver=2][byte accepted(1/0)][utf canonicalServerId][utf friendlyName]
  *   [varint enabledFeatures][varint metricsHz][varint questHz][varint chunkHz][int64 serverTimeMillis]
+ *   [varint negotiatedVersion]
  *
  * `accepted` is a plain 0/1 wire byte (NOT a varint). `serverTimeMillis` is written
- * as a big-endian int64.
+ * as a big-endian int64. Always writes v2: feat-era (v1) mods reject a v2 ack and stay
+ * unregistered — fine, none are deployed and they never enforced the policy anyway.
  */
 export function encodeRegAck(ack: RegAck): Buffer {
   return new Writer()
-    .varInt(1)
+    .varInt(2)
     .byte(ack.accepted ? 1 : 0)
     .utf(ack.canonicalServerId)
     .utf(ack.friendlyName)
@@ -111,6 +114,7 @@ export function encodeRegAck(ack: RegAck): Buffer {
     .varInt(ack.questHz)
     .varInt(ack.chunkHz)
     .long(BigInt(ack.serverTimeMillis))
+    .varInt(ack.negotiatedVersion)
     .build();
 }
 

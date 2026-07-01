@@ -322,7 +322,7 @@ test('decodeRegister reads ver/serverId/hint/caps/node/gameAddr/bootNonce in ord
   assert.equal(reg.bootNonce, bootNonce.toString()); // kept as string, not coerced to Number
 });
 
-test('encodeRegAck writes ver/byte-accepted/ids/hz/serverTime in the exact layout', () => {
+test('encodeRegAck writes ver/byte-accepted/ids/hz/serverTime/negotiated in the exact v2 layout', () => {
   const now = Date.now();
   const buf = encodeRegAck({
     accepted: true,
@@ -333,9 +333,10 @@ test('encodeRegAck writes ver/byte-accepted/ids/hz/serverTime in the exact layou
     questHz: 1,
     chunkHz: 1,
     serverTimeMillis: now,
+    negotiatedVersion: 2,
   });
   const r = new Reader(buf);
-  assert.equal(r.varInt(), 1); // version
+  assert.equal(r.varInt(), 2); // message-format version (v2)
   assert.equal(r.byte(), 1); // accepted is a plain 0/1 byte, NOT a varint
   assert.equal(r.utf(), 'ptero-abc123');
   assert.equal(r.utf(), 'Sky Factory');
@@ -344,10 +345,12 @@ test('encodeRegAck writes ver/byte-accepted/ids/hz/serverTime in the exact layou
   assert.equal(r.varInt(), 1);
   assert.equal(r.varInt(), 1);
   assert.equal(r.long(), BigInt(now));
+  assert.equal(r.varInt(), 2); // trailing negotiatedVersion (v2 field)
 });
 
 test('encodeRegAck writes accepted=0 as a single zero byte', () => {
   const buf = encodeRegAck({
+    negotiatedVersion: 1,
     accepted: false,
     canonicalServerId: 'raw-id',
     friendlyName: '',
@@ -358,7 +361,7 @@ test('encodeRegAck writes accepted=0 as a single zero byte', () => {
     serverTimeMillis: 0,
   });
   const r = new Reader(buf);
-  assert.equal(r.varInt(), 1);
+  assert.equal(r.varInt(), 2);
   assert.equal(r.byte(), 0);
   assert.equal(r.utf(), 'raw-id');
   assert.equal(r.utf(), '');

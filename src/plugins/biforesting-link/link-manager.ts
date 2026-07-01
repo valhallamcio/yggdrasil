@@ -4,6 +4,7 @@ import { getAuthKey } from './auth-key.js';
 import { encodeFrames, encodeOuterUnit } from './frame-codec.js';
 import { decodeMetrics, decodeRegistry, decodeQuest, decodeChunks, decodeRegister, encodeRegAck } from './decoders.js';
 import { saveRegistry, saveQuests, saveChunks } from './persistence.js';
+import { getPolicy, ZERO_POLICY } from './policy-store.js';
 import { serverResolver } from './server-resolver.js';
 import type { LinkIdentity, LinkMetrics, LinkSnapshot, LinkSessionSnapshot, RegisterInfo } from './types.js';
 
@@ -15,11 +16,8 @@ const REGISTRY = 'biforesting:registry';
 const QUEST = 'biforesting:quest';
 const CHUNKS = 'biforesting:chunks';
 
-/**
- * Play-phase capabilities advertised as enabled in `reg_ack` (all on for now):
- * PLAY_TRANSPORT|METRICS|REGISTRY_EXPORT|INVENTORY_SYNC|QUEST_SYNC|CHUNK_SYNC.
- */
-const ENABLED_FEATURES = 0x3f0;
+/** Highest link semantics version this Yggdrasil speaks. */
+const LINK_PROTOCOL_VERSION = 2;
 
 /**
  * Transport-agnostic handle for a single live link session. Lets the manager drive DOWN
@@ -203,35 +201,33 @@ class BiforestingLinkManager {
     const identity = await serverResolver.resolve(reg.serverId);
     s.identity = identity;
 
-    // Duplicate-identity guard: another *currently-connected* session already bound here.
+    // Duplicate identity: NEWEST WINS. A restarted server must displace its own half-open
+    // zombie session (the old socket often lingers until a TCP timeout). bootNonce tells a
+    // restart (different nonce) from a config mistake (two servers, same id — also logged).
     const dup = this.findDuplicateSession(s, identity);
     if (dup) {
       logger.warn(
         {
           sessionId: s.sessionId,
-          existingSessionId: dup.sessionId,
+          evictedSessionId: dup.sessionId,
           serverId: identity.serverId ?? reg.serverId,
           instanceKey: identity.instanceKey,
+          oldBootNonce: dup.register?.bootNonce ?? null,
+          newBootNonce: reg.bootNonce,
         },
-        'biforesting-link: register — another connected session is already bound to this identity (proceeding, flagged)',
+        'biforesting-link: register — evicting older session bound to this identity (newest wins)',
       );
+      try {
+        dup.transport.close();
+      } catch {
+        /* already gone */
+      }
+      this.removeSession(dup.sessionId);
     }
 
     const canonicalServerId = identity.serverId ?? reg.serverId;
     const friendlyName = identity.name ?? '';
-    const serverTimeMillis = Date.now();
-
-    const ack = encodeRegAck({
-      accepted: identity.resolved,
-      canonicalServerId,
-      friendlyName,
-      enabledFeatures: ENABLED_FEATURES,
-      metricsHz: 1,
-      questHz: 1,
-      chunkHz: 1,
-      serverTimeMillis,
-    });
-    const sent = this.sendDownToSession(s, REG_ACK, ack);
+    const sent = await this.sendRegAck(s, canonicalServerId, friendlyName);
 
     logger.info(
       {
@@ -263,6 +259,41 @@ class BiforestingLinkManager {
       resolved: identity.resolved,
       remote: s.remote,
     });
+  }
+
+  /**
+   * Build + send the authoritative reg_ack for a session from the CURRENT stored policy.
+   * Unresolved identities and unknown servers get the ZERO policy — features stay off.
+   */
+  private async sendRegAck(s: Session, canonicalServerId: string, friendlyName: string): Promise<boolean> {
+    const identity = s.identity;
+    const accepted = !!identity?.resolved;
+    const policy = accepted && identity ? await getPolicy(identity.instanceKey) : ZERO_POLICY;
+    // Grant only bits the mod actually advertised: granted = policy ∩ capabilities.
+    const caps = s.register?.capabilities ?? 0;
+    const negotiatedVersion = Math.min(s.register?.linkProtocolVersion ?? 1, LINK_PROTOCOL_VERSION);
+    const ack = encodeRegAck({
+      accepted,
+      canonicalServerId,
+      friendlyName,
+      enabledFeatures: policy.enabledFeatures & caps,
+      metricsHz: policy.metricsHz,
+      questHz: policy.questHz,
+      chunkHz: policy.chunkHz,
+      serverTimeMillis: Date.now(),
+      negotiatedVersion,
+    });
+    return this.sendDownToSession(s, REG_ACK, ack);
+  }
+
+  /**
+   * Re-send reg_ack to a live session after a policy change — the mod applies it immediately
+   * (live per-server kill switch / grant, no reconnect or redeploy). False if no live session.
+   */
+  async resendRegAck(server: string): Promise<boolean> {
+    const s = this.getSessionByServer(server);
+    if (!s || !s.identity) return false;
+    return this.sendRegAck(s, s.identity.serverId ?? s.identity.linkServerId, s.identity.name ?? '');
   }
 
   /** Find another live session bound to the same resolved identity (instanceKey/serverId). */

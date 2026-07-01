@@ -90,6 +90,10 @@ const registry = () =>
   Buffer.concat([vint(1), vint(3), utf('minecraft:dirt'), vint(9), utf('minecraft:stone'), vint(1), utf('create:cogwheel'), vint(7777)]);
 const quest = () =>
   Buffer.concat([vint(1), vint(1), utf('11111111-2222-3333-4444-555555555555'), vint(3700), utf('{progress:[I;1,2,3]}')]);
+// register v2: [ver=2][utf serverId][utf hint][varint caps][utf node][utf gameAddr][i64 bootNonce][varint linkProto=2]
+const BOOT_NONCE = BigInt(Date.now()) * 1000n + BigInt(process.pid % 1000);
+const register = () =>
+  Buffer.concat([vint(2), utf(serverId), utf('fake-mod'), vint(Number(process.env.CAPS ?? 0x10)), utf('fake-node'), utf('127.0.0.1:25565'), i64(BOOT_NONCE), vint(2)]);
 const chunks = () =>
   Buffer.concat([vint(1), vint(1), utf('11111111-2222-3333-4444-555555555555'), vint(1), utf('minecraft:overworld'), vint(0), vint(0), Buffer.from([1])]);
 
@@ -129,6 +133,7 @@ function onData(data) {
 function onOpen(sock) {
   console.log(`[fake-mod] connected (${useWs ? 'ws' : 'tcp'}) to ${host}:${port} as serverId="${serverId}"${process.env.BAD_KEY ? ' (BAD_KEY — expect rejection)' : ''}`);
   sendUnit(sock, 'biforesting:hello', Buffer.from(serverId, 'utf8'));
+  sendUnit(sock, 'biforesting:register', register());
   sendUnit(sock, 'biforesting:registry', registry());
   if (process.env.SEND_QUEST) sendUnit(sock, 'biforesting:quest', quest());
   if (process.env.SEND_CHUNKS) sendUnit(sock, 'biforesting:chunks', chunks());

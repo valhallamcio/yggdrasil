@@ -2,7 +2,8 @@ import { Router } from 'express';
 import { BiforestingController } from './biforesting.controller.js';
 import { validate } from '../../middleware/validate.js';
 import { apiKeyAuth } from '../../middleware/auth/api-key.js';
-import { linkServerParamsSchema, questDownBodySchema, chunksDownBodySchema } from './biforesting.schema.js';
+import { linkServerParamsSchema, policyPutBodySchema, questDownBodySchema, chunksDownBodySchema } from './biforesting.schema.js';
+import { asyncHandler } from '../../shared/utils/async-handler.js';
 
 // Handlers are synchronous (no I/O) — Express 4 forwards synchronous throws to the error
 // handler, so they're bound directly without asyncHandler.
@@ -19,6 +20,22 @@ biforestingRouter.get(
   apiKeyAuth(),
   validate({ params: linkServerParamsSchema }),
   controller.getLinkOne,
+);
+
+// ── Per-server feature policy (authoritative reg_ack source) ────────────────
+
+biforestingRouter.get(
+  '/:server/policy',
+  apiKeyAuth(),
+  validate({ params: linkServerParamsSchema }),
+  asyncHandler(controller.getPolicy),
+);
+
+biforestingRouter.put(
+  '/:server/policy',
+  apiKeyAuth(),
+  validate({ params: linkServerParamsSchema, body: policyPutBodySchema }),
+  asyncHandler(controller.putPolicy),
 );
 
 // ── Authoritative DOWN pushes ────────────────────────────────────────────────

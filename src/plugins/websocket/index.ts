@@ -305,6 +305,29 @@ export class WebSocketPlugin implements Plugin {
 
     const reassembler = new Reassembler();
 
+    // Keepalive: ping every 30s; a client that misses 2 pongs is dead (NAT/half-open) — terminate
+    // so the session frees up and the mod's read timeout + reconnect loop take over.
+    let missedPongs = 0;
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+    (ws as unknown as { on: (ev: string, cb: () => void) => void }).on('pong', () => {
+      missedPongs = 0;
+    });
+    const pingTimer = setInterval(() => {
+      if (missedPongs >= 2) {
+        wsLogger.warn('biforesting-link(ws): 2 missed pongs — terminating dead connection');
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+        (ws as unknown as { terminate: () => void }).terminate();
+        return;
+      }
+      missedPongs += 1;
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+        (ws as unknown as { ping: () => void }).ping();
+      } catch {
+        /* socket already closing */
+      }
+    }, 30_000);
+
     // WS uses the same transport-agnostic session as TCP; DOWN goes out as a single binary message.
     biforestingLinkManager.registerSession(
       sessionId,
@@ -345,6 +368,7 @@ export class WebSocketPlugin implements Plugin {
 
     // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
     ws.on('close', () => {
+      clearInterval(pingTimer);
       wsLogger.info('biforesting-link(ws): connection closed');
       biforestingLinkManager.removeSession(sessionId);
     });
