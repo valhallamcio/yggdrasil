@@ -11,7 +11,8 @@
     "lint": "eslint src --ext .ts",
     "format": "prettier --write \"src/**/*.ts\"",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test test/*.test.ts"
+    "test": "node --import tsx --test test/*.test.ts",
+    "test:db": "node --import tsx --test test/db/*.test.ts"
   },
   "dependencies": {
     "cors": "^2.8.5",
@@ -42,6 +43,7 @@
     "@typescript-eslint/eslint-plugin": "^7.15.0",
     "@typescript-eslint/parser": "^7.15.0",
     "eslint": "^8.57.0",
+    "mongodb-memory-server": "^11.2.0",
     "nodemon": "^3.1.4",
     "prettier": "^3.3.2",
     "tsx": "^4.21.0",

@@ -7,17 +7,23 @@
  * `metrics` + a one-time `registry` (+ optional `quest`/`chunks`), and prints any DOWN frames it
  * receives. Mirrors `YggdrasilLink.java` framing and `PlayFrameCodec.java` signing.
  *
- *   BIFORESTING_PSK=<psk> node scripts/fake-mod.mjs [host] [port] [serverId]
+ *   BIFORESTING_PSK=<psk> node scripts/fake-mod.mjs [host] [port] [serverId]          # raw TCP (deprecated listener)
+ *   BIFORESTING_PSK=<psk> node scripts/fake-mod.mjs --ws [host] [port] [serverId]     # WS /biforesting/ on the main HTTP port
  *   BIFORESTING_AUTHKEY_HEX=<64hex> node scripts/fake-mod.mjs 127.0.0.1 8765 my-server
  *
+ * WS mode mirrors the mod's WebSocketClient: one outer unit per binary message, default port 3000.
  * Flags via env: SEND_QUEST=1 SEND_CHUNKS=1 BAD_KEY=1 (sign with a wrong key → all frames rejected).
  */
 import net from 'node:net';
 import { createHmac, pbkdf2Sync, randomBytes } from 'node:crypto';
+import WebSocket from 'ws';
 
-const host = process.argv[2] ?? '127.0.0.1';
-const port = Number(process.argv[3] ?? 8765);
-const serverId = process.argv[4] ?? 'test';
+const args = process.argv.slice(2);
+const useWs = args.includes('--ws');
+const positional = args.filter((a) => a !== '--ws');
+const host = positional[0] ?? '127.0.0.1';
+const port = Number(positional[1] ?? (useWs ? 3000 : 8765));
+const serverId = positional[2] ?? 'test';
 
 function authKey() {
   if (process.env.BAD_KEY) return randomBytes(32);
@@ -62,14 +68,19 @@ function signFrame(channel, payload) {
   const sig = createHmac('sha256', KEY).update(mac).digest();
   return Buffer.concat([vint(1), vint(messageId), vint(seq), vint(total), i64(ts), i64(nonce), vint(payload.length), payload, sig]);
 }
-function sendUnit(sock, channel, payload) {
+function buildUnit(channel, payload) {
   const frame = signFrame(channel, payload);
   const ch = Buffer.from(channel, 'utf8');
   const head = Buffer.alloc(2 + ch.length + 4);
   head.writeUInt16BE(ch.length, 0);
   ch.copy(head, 2);
   head.writeInt32BE(frame.length, 2 + ch.length);
-  sock.write(Buffer.concat([head, frame]));
+  return Buffer.concat([head, frame]);
+}
+// transport.send is set per-mode below: TCP streams the unit, WS sends it as one binary message.
+const transport = { send: null };
+function sendUnit(_sock, channel, payload) {
+  transport.send(buildUnit(channel, payload));
 }
 
 // ── payload builders ─────────────────────────────────────────────────────────
@@ -115,15 +126,28 @@ function onData(data) {
   }
 }
 
-const sock = net.createConnection({ host, port }, () => {
-  console.log(`[fake-mod] connected to ${host}:${port} as serverId="${serverId}"${process.env.BAD_KEY ? ' (BAD_KEY — expect rejection)' : ''}`);
+function onOpen(sock) {
+  console.log(`[fake-mod] connected (${useWs ? 'ws' : 'tcp'}) to ${host}:${port} as serverId="${serverId}"${process.env.BAD_KEY ? ' (BAD_KEY — expect rejection)' : ''}`);
   sendUnit(sock, 'biforesting:hello', Buffer.from(serverId, 'utf8'));
   sendUnit(sock, 'biforesting:registry', registry());
   if (process.env.SEND_QUEST) sendUnit(sock, 'biforesting:quest', quest());
   if (process.env.SEND_CHUNKS) sendUnit(sock, 'biforesting:chunks', chunks());
   sendUnit(sock, 'biforesting:metrics', metrics());
   setInterval(() => sendUnit(sock, 'biforesting:metrics', metrics()), 1000);
-});
-sock.on('data', onData);
-sock.on('error', (e) => console.error('[fake-mod] error:', e.message));
-sock.on('close', () => { console.log('[fake-mod] closed'); process.exit(0); });
+}
+
+if (useWs) {
+  const ws = new WebSocket(`ws://${host}:${port}/biforesting/`);
+  transport.send = (unit) => ws.send(unit, { binary: true });
+  ws.on('open', () => onOpen(ws));
+  // Each WS message is one complete outer unit; the incremental parser handles it fine.
+  ws.on('message', (raw) => onData(Buffer.isBuffer(raw) ? raw : Buffer.from(raw)));
+  ws.on('error', (e) => console.error('[fake-mod] error:', e.message));
+  ws.on('close', () => { console.log('[fake-mod] closed'); process.exit(0); });
+} else {
+  const sock = net.createConnection({ host, port }, () => onOpen(sock));
+  transport.send = (unit) => sock.write(unit);
+  sock.on('data', onData);
+  sock.on('error', (e) => console.error('[fake-mod] error:', e.message));
+  sock.on('close', () => { console.log('[fake-mod] closed'); process.exit(0); });
+}
