@@ -234,6 +234,14 @@ export class WebSocketPlugin implements Plugin {
       this.broadcast({ type: 'biforesting.link.data', payload });
     });
 
+    eventBus.on('biforesting.op.updated', (payload) => {
+      this.broadcast({ type: 'biforesting.op.updated', payload });
+    });
+
+    eventBus.on('biforesting.presence', (payload) => {
+      this.broadcast({ type: 'biforesting.presence', payload });
+    });
+
     // ── Console channel (per-server subscriptions) ────────────────────────────
     eventBus.on('server.console.output', ({ server, line }) => {
       const subscribers = this.consoleSubscriptions.get(server);

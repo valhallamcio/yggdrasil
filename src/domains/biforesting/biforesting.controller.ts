@@ -2,9 +2,11 @@ import type { Request, Response } from 'express';
 import { biforestingLinkManager } from '../../plugins/biforesting-link/link-manager.js';
 import { encodeQuestDown, encodeChunksDown } from '../../plugins/biforesting-link/decoders.js';
 import { getPolicy, setPolicy, maskForFeatures, featureNamesForMask } from '../../plugins/biforesting-link/policy-store.js';
+import { opDispatcher, opsStore } from '../../plugins/biforesting-link/ops-runtime.js';
 import { serverResolver } from '../../plugins/biforesting-link/server-resolver.js';
 import { NotFoundError, ValidationError } from '../../shared/errors/index.js';
-import type { LinkServerParams, PolicyPutBody, QuestDownBody, ChunksDownBody } from './biforesting.schema.js';
+import { catalogEntry, OPS_CATALOG } from './ops-catalog.js';
+import type { LinkServerParams, PolicyPutBody, QuestDownBody, ChunksDownBody, OpCreateBody, OpIdParams, OpListQuery } from './biforesting.schema.js';
 
 const QUEST_CHANNEL = 'biforesting:quest';
 const CHUNKS_CHANNEL = 'biforesting:chunks';
@@ -73,6 +75,98 @@ export class BiforestingController {
         chunkHz: doc.chunkHz,
         reAcked,
       },
+    });
+  };
+
+  // ── Durable ops ─────────────────────────────────────────────────────────────
+
+  /**
+   * Create a durable op for a backend. Validated against the ops catalog; an `idempotencyKey`
+   * replay returns the existing op (201 only for a fresh insert). Dispatches immediately when the
+   * backend has a live link; otherwise the op waits durably for link-up.
+   */
+  createOp = async (req: Request, res: Response): Promise<void> => {
+    const { server } = req.params as unknown as LinkServerParams;
+    const body = req.body as OpCreateBody;
+
+    const entry = catalogEntry(body.type);
+    if (!entry) {
+      throw new ValidationError(`Unknown op type '${body.type}' — known: ${Object.keys(OPS_CATALOG).join(', ')}`);
+    }
+    const parsed = entry.params.safeParse(body.params);
+    if (!parsed.success) {
+      throw new ValidationError(`Invalid params for '${body.type}': ${parsed.error.issues.map((i) => i.message).join('; ')}`);
+    }
+    if (!entry.serverGlobal && !body.target) {
+      throw new ValidationError(`Op type '${body.type}' requires a target player`);
+    }
+
+    const identity = await serverResolver.resolve(server);
+    if (!identity.resolved) {
+      throw new ValidationError(`Unknown server '${server}' — ops must target a resolvable server`);
+    }
+
+    const createdBy = (req.headers['x-actor'] as string | undefined) ?? 'api';
+    const { op, replayed } = await opsStore.create({
+      instanceKey: identity.instanceKey,
+      serverTag: identity.tag,
+      type: body.type,
+      params: parsed.data as Record<string, unknown>,
+      target: body.target ?? null,
+      flags: body.flags ?? {},
+      ...(body.idempotencyKey ? { idempotencyKey: body.idempotencyKey } : {}),
+      notBefore: body.notBefore ?? null,
+      ...(body.expiresInMs !== undefined ? { expiresInMs: body.expiresInMs } : {}),
+      ...(body.maxAttempts !== undefined ? { maxAttempts: body.maxAttempts } : {}),
+      ...(body.dispatchTimeoutMs !== undefined ? { dispatchTimeoutMs: body.dispatchTimeoutMs } : {}),
+      ...(body.execTimeoutMs !== undefined ? { execTimeoutMs: body.execTimeoutMs } : {}),
+      createdBy,
+    });
+
+    if (!replayed) await opDispatcher.onOpCreated(op);
+    const current = (await opsStore.get(op._id)) ?? op;
+    res.status(replayed ? 200 : 201).json({ data: { op: current, replayed } });
+  };
+
+  getOp = async (req: Request, res: Response): Promise<void> => {
+    const { opId } = req.params as unknown as OpIdParams;
+    const op = await opsStore.get(opId);
+    if (!op) throw new NotFoundError('Op', opId);
+    res.json({ data: op });
+  };
+
+  listOps = async (req: Request, res: Response): Promise<void> => {
+    const { server } = req.params as unknown as LinkServerParams;
+    const query = req.query as unknown as OpListQuery;
+    const identity = await serverResolver.resolve(server);
+    const ops = await opsStore.list(
+      { instanceKey: identity.instanceKey, ...(query.state ? { state: query.state } : {}), ...(query.type ? { type: query.type } : {}) },
+      query.limit,
+    );
+    res.json({ data: { instanceKey: identity.instanceKey, ops, count: ops.length } });
+  };
+
+  cancelOp = async (req: Request, res: Response): Promise<void> => {
+    const { opId } = req.params as unknown as OpIdParams;
+    const existing = await opsStore.get(opId);
+    if (!existing) throw new NotFoundError('Op', opId);
+    const by = (req.headers['x-actor'] as string | undefined) ?? 'api';
+    const cancelled = await opsStore.cancel(opId, by);
+    if (!cancelled) {
+      throw new ValidationError(`Op ${opId} is '${existing.state}' — only pending/dispatched/waiting_player ops can be cancelled`);
+    }
+    res.json({ data: cancelled });
+  };
+
+  /** The op catalog (types, param shapes are internal — expose names, risk, target requirement). */
+  getOpsCatalog = (_req: Request, res: Response): void => {
+    res.json({
+      data: Object.entries(OPS_CATALOG).map(([type, e]) => ({
+        type,
+        serverGlobal: e.serverGlobal,
+        risk: e.risk,
+        description: e.description,
+      })),
     });
   };
 

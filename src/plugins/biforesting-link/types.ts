@@ -96,6 +96,93 @@ export interface LinkIdentity {
   resolved: boolean;
 }
 
+// ── Durable ops (biforesting_ops — the keystone job store) ──────────────────
+
+export type OpState =
+  | 'pending'
+  | 'dispatched'
+  | 'acked'
+  | 'waiting_player'
+  | 'completed'
+  | 'failed'
+  | 'expired'
+  | 'cancelled';
+
+export interface OpTarget {
+  uuid?: string;
+  name?: string;
+}
+
+export interface OpFlags {
+  /** How to handle an offline target: queue for login (default), offline-edit in-JVM, or reject. */
+  offlineMode?: 'queue' | 'offline-edit' | 'reject';
+  dryRun?: boolean;
+}
+
+export interface OpAuditEntry {
+  at: Date;
+  from: OpState | null;
+  to: OpState;
+  note?: string;
+}
+
+export interface OpResult {
+  ok: boolean;
+  data?: unknown;
+  error?: string;
+  durationMs?: number;
+}
+
+/** One durable op in `biforesting_ops`. `_id` is a ULID (time-sortable). */
+export interface OpDoc {
+  _id: string;
+  /** Client-supplied replay guard — POSTing the same key returns the existing op. */
+  idempotencyKey?: string;
+  instanceKey: string;
+  serverTag: string | null;
+  type: string;
+  params: Record<string, unknown>;
+  target: OpTarget | null;
+  flags: OpFlags;
+  state: OpState;
+  attempts: number;
+  maxAttempts: number;
+  dispatchTimeoutMs: number;
+  execTimeoutMs: number;
+  notBefore: Date | null;
+  expiresAt: Date;
+  parentOpId: string | null;
+  childIndex: number | null;
+  createdBy: string;
+  audit: OpAuditEntry[];
+  result: OpResult | null;
+  createdAt: Date;
+  updatedAt: Date;
+  dispatchedAt: Date | null;
+  ackedAt: Date | null;
+  completedAt: Date | null;
+}
+
+/** Decoded `biforesting:op_res` (UP): ack that an op arrived, then its terminal result. */
+export interface OpResMsg {
+  opId: string;
+  phase: 'ack' | 'result';
+  /** result phase only. */
+  status?: 'completed' | 'failed' | 'waiting_player';
+  result?: unknown;
+  error?: string;
+  durationMs?: number;
+  /** True when the mod answered from its dedup journal instead of re-executing. */
+  journalReplay?: boolean;
+}
+
+/** Decoded `biforesting:presence` (UP): join/quit events + full snapshot on link-up. */
+export interface PresenceMsg {
+  event: 'join' | 'quit' | 'snapshot';
+  player: { uuid: string; name: string } | null;
+  online: Array<{ uuid: string; name: string }> | null;
+}
+
 // ── Session snapshot (observability) ─────────────────────────────────────────
 
 export interface LinkSessionSnapshot {

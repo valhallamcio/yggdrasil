@@ -5,6 +5,45 @@ export const linkServerParamsSchema = z.object({
   server: z.string().min(1).max(64),
 });
 
+// ── Durable ops ──────────────────────────────────────────────────────────────
+
+export const opIdParamsSchema = z.object({
+  opId: z.string().regex(/^[0-9A-HJKMNP-TV-Z]{26}$/, 'opId must be a ULID'),
+});
+
+/** POST body for op creation. `params` is validated per-type against the ops catalog. */
+export const opCreateBodySchema = z.object({
+  type: z.string().min(1).max(64),
+  params: z.record(z.unknown()).default({}),
+  target: z
+    .object({
+      uuid: z.string().uuid().optional(),
+      name: z.string().min(1).max(32).optional(),
+    })
+    .refine((t) => t.uuid !== undefined || t.name !== undefined, { message: 'target needs uuid or name' })
+    .optional(),
+  flags: z
+    .object({
+      offlineMode: z.enum(['queue', 'offline-edit', 'reject']).optional(),
+      dryRun: z.boolean().optional(),
+    })
+    .optional(),
+  idempotencyKey: z.string().min(8).max(128).optional(),
+  notBefore: z.coerce.date().optional(),
+  expiresInMs: z.number().int().min(60_000).max(30 * 24 * 3600_000).optional(),
+  maxAttempts: z.number().int().min(1).max(20).optional(),
+  dispatchTimeoutMs: z.number().int().min(1_000).max(300_000).optional(),
+  execTimeoutMs: z.number().int().min(1_000).max(600_000).optional(),
+});
+
+export const opListQuerySchema = z.object({
+  state: z
+    .enum(['pending', 'dispatched', 'acked', 'waiting_player', 'completed', 'failed', 'expired', 'cancelled'])
+    .optional(),
+  type: z.string().min(1).max(64).optional(),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+});
+
 export const questDownBodySchema = z.object({
   teams: z
     .array(
@@ -55,3 +94,6 @@ export type LinkServerParams = z.infer<typeof linkServerParamsSchema>;
 export type PolicyPutBody = z.infer<typeof policyPutBodySchema>;
 export type QuestDownBody = z.infer<typeof questDownBodySchema>;
 export type ChunksDownBody = z.infer<typeof chunksDownBodySchema>;
+export type OpIdParams = z.infer<typeof opIdParamsSchema>;
+export type OpCreateBody = z.infer<typeof opCreateBodySchema>;
+export type OpListQuery = z.infer<typeof opListQuerySchema>;

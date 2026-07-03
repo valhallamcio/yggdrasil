@@ -1,5 +1,5 @@
 import { Reader, Writer } from './frame-codec.js';
-import type { LinkMetrics, RegistryPayload, QuestTeam, ChunkTeam, RegisterInfo, RegAck } from './types.js';
+import type { LinkMetrics, RegistryPayload, QuestTeam, ChunkTeam, RegisterInfo, RegAck, OpResMsg, PresenceMsg } from './types.js';
 
 /**
  * Payload decoders/encoders for the four link channels. Field order mirrors
@@ -118,6 +118,44 @@ export function encodeRegAck(ack: RegAck): Buffer {
     .build();
 }
 
+
+// ── Ops + presence (JSON payloads per D7 — Gson mod-side, ≤20-char channels) ──
+
+/**
+ * `biforesting:op` (DOWN) and `biforesting:op_res` / `biforesting:presence` (UP) all share the
+ * same envelope: `[varint ver=1][utf json]`. JSON keeps the op payload schema-free across the
+ * four mod trees (Gson ships with MC on every target incl. 1.7.10).
+ */
+export function encodeJsonPayload(json: string): Buffer {
+  return new Writer().varInt(1).utf(json).build();
+}
+
+export function decodeJsonPayload(payload: Buffer): unknown {
+  const r = new Reader(payload);
+  r.varInt(); // version
+  return JSON.parse(r.utf());
+}
+
+export function decodeOpRes(payload: Buffer): OpResMsg {
+  const raw = decodeJsonPayload(payload) as Record<string, unknown>;
+  if (typeof raw['opId'] !== 'string' || (raw['phase'] !== 'ack' && raw['phase'] !== 'result')) {
+    throw new Error('malformed op_res: opId/phase missing');
+  }
+  return raw as unknown as OpResMsg;
+}
+
+export function decodePresence(payload: Buffer): PresenceMsg {
+  const raw = decodeJsonPayload(payload) as Record<string, unknown>;
+  const event = raw['event'];
+  if (event !== 'join' && event !== 'quit' && event !== 'snapshot') {
+    throw new Error('malformed presence: unknown event');
+  }
+  return {
+    event,
+    player: (raw['player'] as PresenceMsg['player']) ?? null,
+    online: (raw['online'] as PresenceMsg['online']) ?? null,
+  };
+}
 
 export function encodeQuestDown(teams: QuestTeam[]): Buffer {
   const w = new Writer().varInt(1).varInt(teams.length);

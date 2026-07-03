@@ -63,12 +63,16 @@ export function featureNamesForMask(mask: number): string[] {
     .map(([name]) => name);
 }
 
-function db(): Db {
-  return getDb();
+// Db resolved lazily per call (never captured); tests inject mem-mongo here.
+let dbProvider: () => Db = getDb;
+
+/** Test seam: point the policy store at a different Db (e.g. mongodb-memory-server). */
+export function setPolicyDbProvider(provider: () => Db): void {
+  dbProvider = provider;
 }
 
 function policiesCol(): Collection<LinkPolicyDoc> {
-  return db().collection<LinkPolicyDoc>('biforesting_policies');
+  return dbProvider().collection<LinkPolicyDoc>('biforesting_policies');
 }
 
 let indexEnsured = false;

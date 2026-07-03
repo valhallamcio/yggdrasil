@@ -7,6 +7,7 @@ import { parseOuterUnits, Reassembler, MAX_INBOUND_FRAME } from './frame-codec.j
 import { biforestingLinkManager } from './link-manager.js';
 import { processOuterUnit } from './session-processor.js';
 import { ensureIndexes } from './persistence.js';
+import { opDispatcher, opsStore } from './ops-runtime.js';
 
 /** Idle sockets are dropped after this long with no traffic (the mod streams metrics ~1 Hz). */
 const SOCKET_TIMEOUT_MS = 300_000;
@@ -33,6 +34,12 @@ export class BiforestingLinkPlugin implements Plugin {
   async init(): Promise<void> {
     getAuthKey(); // fail fast if the PSK/authKey is missing or malformed
     await ensureIndexes();
+    await opsStore.ensureIndexes();
+
+    // Durable ops: boot-reset stranded `dispatched` ops, start the recovery sweep, and route
+    // op_res/presence/link-up through the dispatcher.
+    biforestingLinkManager.setOpSink(opDispatcher);
+    await opDispatcher.start();
 
     const port = config.BIFORESTING_LINK_PORT;
     const host = config.BIFORESTING_LINK_HOST;
@@ -111,6 +118,8 @@ export class BiforestingLinkPlugin implements Plugin {
   }
 
   async shutdown(): Promise<void> {
+    opDispatcher.stop();
+    biforestingLinkManager.setOpSink(null);
     biforestingLinkManager.listening = false;
     biforestingLinkManager.closeAll();
     if (this.server) {

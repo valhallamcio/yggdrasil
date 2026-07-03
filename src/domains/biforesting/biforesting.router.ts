@@ -2,7 +2,15 @@ import { Router } from 'express';
 import { BiforestingController } from './biforesting.controller.js';
 import { validate } from '../../middleware/validate.js';
 import { apiKeyAuth } from '../../middleware/auth/api-key.js';
-import { linkServerParamsSchema, policyPutBodySchema, questDownBodySchema, chunksDownBodySchema } from './biforesting.schema.js';
+import {
+  linkServerParamsSchema,
+  policyPutBodySchema,
+  questDownBodySchema,
+  chunksDownBodySchema,
+  opCreateBodySchema,
+  opIdParamsSchema,
+  opListQuerySchema,
+} from './biforesting.schema.js';
 import { asyncHandler } from '../../shared/utils/async-handler.js';
 
 // Handlers are synchronous (no I/O) — Express 4 forwards synchronous throws to the error
@@ -20,6 +28,38 @@ biforestingRouter.get(
   apiKeyAuth(),
   validate({ params: linkServerParamsSchema }),
   controller.getLinkOne,
+);
+
+// ── Durable ops (literal /ops routes BEFORE /:server) ───────────────────────
+
+biforestingRouter.get('/ops-catalog', apiKeyAuth(), controller.getOpsCatalog);
+
+biforestingRouter.get(
+  '/ops/:opId',
+  apiKeyAuth(),
+  validate({ params: opIdParamsSchema }),
+  asyncHandler(controller.getOp),
+);
+
+biforestingRouter.post(
+  '/ops/:opId/cancel',
+  apiKeyAuth(),
+  validate({ params: opIdParamsSchema }),
+  asyncHandler(controller.cancelOp),
+);
+
+biforestingRouter.post(
+  '/:server/ops',
+  apiKeyAuth(),
+  validate({ params: linkServerParamsSchema, body: opCreateBodySchema }),
+  asyncHandler(controller.createOp),
+);
+
+biforestingRouter.get(
+  '/:server/ops',
+  apiKeyAuth(),
+  validate({ params: linkServerParamsSchema, query: opListQuerySchema }),
+  asyncHandler(controller.listOps),
 );
 
 // ── Per-server feature policy (authoritative reg_ack source) ────────────────

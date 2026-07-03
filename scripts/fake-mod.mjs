@@ -13,6 +13,14 @@
  *
  * WS mode mirrors the mod's WebSocketClient: one outer unit per binary message, default port 3000.
  * Flags via env: SEND_QUEST=1 SEND_CHUNKS=1 BAD_KEY=1 (sign with a wrong key → all frames rejected).
+ *
+ * Durable-ops emulation via `--op-mode <mode>` (how DOWN `biforesting:op` is answered):
+ *   ack-ok    (default) ack, then a completed result — the happy path
+ *   ack-drop  ack, never a result             → exercises the exec-timeout sweep
+ *   drop      no response at all              → exercises the dispatch-timeout requeue
+ *   dup       ack + result sent TWICE         → exercises store transition idempotency
+ *   waiting   result status=waiting_player, then a presence join 2 s later; a re-dispatched
+ *             op completes → exercises the waiting_player → presence → requeue path
  */
 import net from 'node:net';
 import { createHmac, pbkdf2Sync, randomBytes } from 'node:crypto';
@@ -20,7 +28,9 @@ import WebSocket from 'ws';
 
 const args = process.argv.slice(2);
 const useWs = args.includes('--ws');
-const positional = args.filter((a) => a !== '--ws');
+const opModeIdx = args.indexOf('--op-mode');
+const opMode = opModeIdx >= 0 ? args[opModeIdx + 1] : 'ack-ok';
+const positional = args.filter((a, i) => a !== '--ws' && i !== opModeIdx && i !== opModeIdx + 1);
 const host = positional[0] ?? '127.0.0.1';
 const port = Number(positional[1] ?? (useWs ? 3000 : 8765));
 const serverId = positional[2] ?? 'test';
@@ -127,6 +137,52 @@ function onData(data) {
     const [clen2, s2] = readVar(frame, o); o += s2;
     const chunk = frame.subarray(o, o + clen2);
     console.log(`[fake-mod] DOWN ${channel}: ${chunk.length}B payload`);
+    if (channel === 'biforesting:op') onOp(chunk);
+  }
+}
+
+// ── durable-ops emulation ────────────────────────────────────────────────────
+const jsonPayload = (obj) => Buffer.concat([vint(1), utf(JSON.stringify(obj))]);
+const seenOps = new Set(); // opIds already answered `waiting` (a re-dispatch completes)
+
+function onOp(chunk) {
+  // payload: [varint ver][utf json]
+  let o = 0;
+  const [, vs] = readVar(chunk, o); o += vs;           // ver
+  const [slen, ss] = readVar(chunk, o); o += ss;       // utf length
+  const op = JSON.parse(chunk.toString('utf8', o, o + slen));
+  console.log(`[fake-mod] op ${op.opId} type=${op.type} mode=${opMode}`);
+  const ack = () => sendUnit(null, 'biforesting:op_res', jsonPayload({ opId: op.opId, phase: 'ack' }));
+  const result = (extra) =>
+    sendUnit(null, 'biforesting:op_res', jsonPayload({ opId: op.opId, phase: 'result', durationMs: 5, ...extra }));
+  const completed = () => result({ status: 'completed', result: { echoed: op.params?.message ?? null } });
+
+  switch (opMode) {
+    case 'drop':
+      break;
+    case 'ack-drop':
+      ack();
+      break;
+    case 'dup':
+      ack(); completed();
+      ack(); completed();
+      break;
+    case 'waiting': {
+      ack();
+      if (seenOps.has(op.opId)) { completed(); break; }
+      seenOps.add(op.opId);
+      result({ status: 'waiting_player' });
+      const target = op.target ?? { uuid: '00000000-0000-0000-0000-000000000001', name: 'TestPlayer' };
+      setTimeout(() => {
+        console.log(`[fake-mod] presence join ${target.name ?? target.uuid}`);
+        sendUnit(null, 'biforesting:presence', jsonPayload({ event: 'join', player: { uuid: target.uuid ?? '', name: target.name ?? '' } }));
+      }, 2000);
+      break;
+    }
+    case 'ack-ok':
+    default:
+      ack(); completed();
+      break;
   }
 }
 
@@ -135,6 +191,12 @@ function onOpen(sock) {
   sendUnit(sock, 'biforesting:hello', Buffer.from(serverId, 'utf8'));
   sendUnit(sock, 'biforesting:register', register());
   sendUnit(sock, 'biforesting:registry', registry());
+  if (process.env.SEND_PRESENCE) {
+    sendUnit(sock, 'biforesting:presence', jsonPayload({
+      event: 'snapshot',
+      online: [{ uuid: '00000000-0000-0000-0000-000000000001', name: 'TestPlayer' }],
+    }));
+  }
   if (process.env.SEND_QUEST) sendUnit(sock, 'biforesting:quest', quest());
   if (process.env.SEND_CHUNKS) sendUnit(sock, 'biforesting:chunks', chunks());
   sendUnit(sock, 'biforesting:metrics', metrics());

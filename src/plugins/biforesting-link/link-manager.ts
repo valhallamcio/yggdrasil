@@ -2,11 +2,11 @@ import { eventBus } from '../../core/event-bus/index.js';
 import { logger } from '../../core/logger/index.js';
 import { getAuthKey } from './auth-key.js';
 import { encodeFrames, encodeOuterUnit } from './frame-codec.js';
-import { decodeMetrics, decodeRegistry, decodeQuest, decodeChunks, decodeRegister, encodeRegAck } from './decoders.js';
+import { decodeMetrics, decodeRegistry, decodeQuest, decodeChunks, decodeRegister, decodeOpRes, decodePresence, encodeRegAck } from './decoders.js';
 import { saveRegistry, saveQuests, saveChunks } from './persistence.js';
 import { getPolicy, ZERO_POLICY } from './policy-store.js';
 import { serverResolver } from './server-resolver.js';
-import type { LinkIdentity, LinkMetrics, LinkSnapshot, LinkSessionSnapshot, RegisterInfo } from './types.js';
+import type { LinkIdentity, LinkMetrics, LinkSnapshot, LinkSessionSnapshot, OpResMsg, PresenceMsg, RegisterInfo } from './types.js';
 
 const HELLO = 'biforesting:hello';
 const REGISTER = 'biforesting:register';
@@ -15,6 +15,19 @@ const METRICS = 'biforesting:metrics';
 const REGISTRY = 'biforesting:registry';
 const QUEST = 'biforesting:quest';
 const CHUNKS = 'biforesting:chunks';
+const OP_RES = 'biforesting:op_res';
+const PRESENCE = 'biforesting:presence';
+
+/**
+ * Where op_res/presence messages and link-up notifications go (the op dispatcher). Wired by the
+ * plugin's init via {@link BiforestingLinkManager.setOpSink} — keeps this module free of an
+ * import cycle with the ops runtime.
+ */
+export interface OpSink {
+  onOpRes(instanceKey: string, msg: OpResMsg): Promise<void>;
+  onPresence(instanceKey: string, msg: PresenceMsg): Promise<void>;
+  onLinkUp(instanceKey: string): Promise<void>;
+}
 
 /** Highest link semantics version this Yggdrasil speaks. */
 const LINK_PROTOCOL_VERSION = 2;
@@ -64,6 +77,21 @@ class BiforestingLinkManager {
   private readonly sessions = new Map<string, Session>();
   listening = false;
   private downSeq = 0;
+  private opSink: OpSink | null = null;
+
+  /** Wire the op dispatcher (plugin init). */
+  setOpSink(sink: OpSink | null): void {
+    this.opSink = sink;
+  }
+
+  /** instanceKeys of all live, identity-resolved sessions (op dispatch sweep). */
+  liveInstanceKeys(): string[] {
+    const keys: string[] = [];
+    for (const s of this.sessions.values()) {
+      if (s.identity?.resolved && s.transport.writable()) keys.push(s.identity.instanceKey);
+    }
+    return keys;
+  }
 
   // ── Session lifecycle ──────────────────────────────────────────────────────
 
@@ -156,6 +184,16 @@ class BiforestingLinkManager {
         break;
       case CHUNKS:
         await this.onChunks(s, payload);
+        break;
+      case OP_RES:
+        if (s.identity?.resolved && this.opSink) {
+          await this.opSink.onOpRes(s.identity.instanceKey, decodeOpRes(payload));
+        }
+        break;
+      case PRESENCE:
+        if (s.identity?.resolved && this.opSink) {
+          await this.opSink.onPresence(s.identity.instanceKey, decodePresence(payload));
+        }
         break;
       default:
         logger.debug({ sessionId: s.sessionId, channel, bytes: payload.length }, 'biforesting-link: unknown channel');
@@ -259,6 +297,11 @@ class BiforestingLinkManager {
       resolved: identity.resolved,
       remote: s.remote,
     });
+
+    // Link-up: flush any ops queued while this backend was away (at-least-once; mod journal dedups).
+    if (identity.resolved && this.opSink) {
+      await this.opSink.onLinkUp(identity.instanceKey);
+    }
   }
 
   /**
