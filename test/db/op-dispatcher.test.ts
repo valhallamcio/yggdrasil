@@ -6,10 +6,16 @@ import { startTestMongo, type TestMongo } from '../helpers/mongo.ts';
 import { OpsStore } from '../../src/plugins/biforesting-link/ops-store.ts';
 import { OpDispatcher, OP_CHANNEL } from '../../src/plugins/biforesting-link/op-dispatcher.ts';
 import { decodeJsonPayload } from '../../src/plugins/biforesting-link/decoders.ts';
+import { setPolicy, setPolicyDbProvider, maskForFeatures } from '../../src/plugins/biforesting-link/policy-store.ts';
 
 let mongo: TestMongo;
 let store: OpsStore;
 let seq = 0;
+
+/** Dispatch is policy-gated: grant the ops bit for an instance under test. */
+async function grantOps(instanceKey: string): Promise<void> {
+  await setPolicy(instanceKey, { enabledFeatures: maskForFeatures(['play_transport', 'ops']) }, 'test');
+}
 
 /** Capturing fake of the link manager: records DOWN sends, per-instance liveness switch. */
 function mkPort() {
@@ -30,6 +36,10 @@ function mkPort() {
 before(async () => {
   mongo = await startTestMongo();
   store = new OpsStore(() => mongo.client.db('ygg_dispatch_test'));
+  setPolicyDbProvider(() => mongo.client.db('ygg_dispatch_test'));
+  for (const key of ['pack-a', 'pack-down', 'pack-b', 'pack-c', 'pack-evil', 'pack-f', 'pack-w', 'pack-s', 'pack-e', 'pack-t']) {
+    await grantOps(key);
+  }
 });
 after(async () => mongo.stop());
 
@@ -171,6 +181,28 @@ test('dispatcher: sweep expires ops past expiresAt', async () => {
   const { op } = await store.create(mkInput('pack-e', { expiresInMs: 60_000 }));
   await d.sweep(new Date(Date.now() + 120_000));
   assert.equal((await store.get(op._id))?.state, 'expired');
+});
+
+test('dispatcher: ops bit OFF is the rollback lever — op queues, never dispatches, burns no attempts', async () => {
+  const port = mkPort();
+  const d = new OpDispatcher(store, port);
+  port.live.add('pack-gated'); // live link, but NO ops grant
+
+  const { op } = await store.create(mkInput('pack-gated'));
+  await d.onOpCreated(op);
+  await d.onLinkUp('pack-gated');
+  await d.sweep(new Date(Date.now() + 60_000));
+
+  const after = await store.get(op._id);
+  assert.equal(after?.state, 'pending', 'stays queued with the bit off');
+  assert.equal(after?.attempts, 0, 'no dispatch attempts burned');
+  assert.equal(port.sent.length, 0, 'nothing hit the wire');
+
+  // granting the bit releases the queue on the next link-up/sweep
+  await grantOps('pack-gated');
+  await d.onLinkUp('pack-gated');
+  assert.equal((await store.get(op._id))?.state, 'dispatched');
+  assert.equal(port.sent.length, 1);
 });
 
 test('dispatcher: sweep fails an acked op whose result never arrives', async () => {

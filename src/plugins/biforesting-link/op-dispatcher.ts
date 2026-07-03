@@ -1,10 +1,12 @@
 import { eventBus } from '../../core/event-bus/index.js';
 import { logger } from '../../core/logger/index.js';
 import { encodeJsonPayload } from './decoders.js';
+import { getPolicy, FEATURE_BITS } from './policy-store.js';
 import type { OpsStore } from './ops-store.js';
 import type { OpDoc, OpResMsg, PresenceMsg } from './types.js';
 
 export const OP_CHANNEL = 'biforesting:op';
+const CAP_OPS = FEATURE_BITS['ops']!;
 
 /** How the dispatcher reaches a live link session (implemented by the link manager). */
 export interface OpSendPort {
@@ -50,8 +52,13 @@ export class OpDispatcher {
 
   // ── Dispatch ───────────────────────────────────────────────────────────────
 
-  /** Push every dispatchable pending op for an instance DOWN its live link. */
+  /**
+   * Push every dispatchable pending op for an instance DOWN its live link. Gated on the stored
+   * policy's `ops` bit — the named rollback lever: with the bit off, ops queue durably but are
+   * NEVER dispatched (no redeploy needed to stop the flow).
+   */
   async dispatchPendingFor(instanceKey: string): Promise<number> {
+    if (!(await this.opsEnabled(instanceKey))) return 0;
     const ops = await this.store.findDispatchable(instanceKey);
     let sent = 0;
     for (const op of ops) {
@@ -60,12 +67,20 @@ export class OpDispatcher {
     return sent;
   }
 
+  private async opsEnabled(instanceKey: string): Promise<boolean> {
+    const policy = await getPolicy(instanceKey);
+    return (policy.enabledFeatures & CAP_OPS) !== 0;
+  }
+
   /**
    * Dispatch a single op: CAS pending→dispatched first, then write. If the write fails (link died
    * between the check and the write) the op stays `dispatched` and the sweep re-queues it after
    * dispatchTimeoutMs — safe, just slower than rolling back eagerly.
    */
   private async dispatchOne(op: OpDoc): Promise<boolean> {
+    // Gate BEFORE the pending→dispatched CAS: with the ops bit off the op must stay `pending`
+    // untouched (not burn attempts in a dispatch/timeout loop).
+    if (!(await this.opsEnabled(op.instanceKey))) return false;
     const dispatched = await this.store.markDispatched(op._id);
     if (!dispatched) return false; // raced by cancel/expiry/another dispatch
     this.emitUpdated(dispatched);
