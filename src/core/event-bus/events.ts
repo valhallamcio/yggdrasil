@@ -37,7 +37,8 @@ export type AppEvent =
   | { type: 'biforesting.link.metrics'; payload: { instanceKey: string; tag: string | null; serverId: string | null; mspt: number; tps: number; players: number; levels: number; loadedChunks: number; heapUsed: number; heapMax: number } }
   | { type: 'biforesting.link.data'; payload: { instanceKey: string; tag: string | null; serverId: string | null; channel: 'registry' | 'quest' | 'chunks'; count: number } }
   | { type: 'biforesting.op.updated'; payload: { opId: string; instanceKey: string; serverTag: string | null; type: string; state: string; attempts: number; result: unknown; parentOpId: string | null; updatedAt: Date } }
-  | { type: 'biforesting.presence'; payload: { instanceKey: string; event: 'join' | 'quit' | 'snapshot'; player: { uuid: string; name: string } | null; online: Array<{ uuid: string; name: string }> | null } };
+  | { type: 'biforesting.presence'; payload: { instanceKey: string; event: 'join' | 'quit' | 'snapshot'; player: { uuid: string; name: string } | null; online: Array<{ uuid: string; name: string }> | null } }
+  | { type: 'biforesting.inv.snapshot'; payload: { instanceKey: string; uuid: string; name: string; reason: string; sizeBytes: number } };
 
 export type AppEventType = AppEvent['type'];
 export type AppEventPayload<T extends AppEventType> = Extract<AppEvent, { type: T }>['payload'];

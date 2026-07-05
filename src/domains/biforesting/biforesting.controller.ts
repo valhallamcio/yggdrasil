@@ -3,11 +3,12 @@ import { biforestingLinkManager } from '../../plugins/biforesting-link/link-mana
 import { encodeQuestDown, encodeChunksDown } from '../../plugins/biforesting-link/decoders.js';
 import { getPolicy, setPolicy, maskForFeatures, featureNamesForMask } from '../../plugins/biforesting-link/policy-store.js';
 import { opDispatcher, opsStore } from '../../plugins/biforesting-link/ops-runtime.js';
+import { latestSnapshot, listSnapshots, getSnapshot } from '../../plugins/biforesting-link/inv-store.js';
 import { latestStored, rawHistory, hourlyHistory } from '../../plugins/biforesting-link/metrics-history.js';
 import { serverResolver } from '../../plugins/biforesting-link/server-resolver.js';
 import { NotFoundError, ValidationError } from '../../shared/errors/index.js';
 import { catalogEntry, OPS_CATALOG } from './ops-catalog.js';
-import type { LinkServerParams, PolicyPutBody, QuestDownBody, ChunksDownBody, OpCreateBody, OpIdParams, OpListQuery, MetricsHistoryQuery } from './biforesting.schema.js';
+import type { LinkServerParams, PolicyPutBody, QuestDownBody, ChunksDownBody, OpCreateBody, OpIdParams, OpListQuery, MetricsHistoryQuery, PlayerInvParams, SnapshotIdParams } from './biforesting.schema.js';
 
 const QUEST_CHANNEL = 'biforesting:quest';
 const CHUNKS_CHANNEL = 'biforesting:chunks';
@@ -24,6 +25,79 @@ export class BiforestingController {
     const session = biforestingLinkManager.getSessionSnapshot(server);
     if (!session) throw new NotFoundError('Link session', server);
     res.json({ data: session });
+  };
+
+  /**
+   * The player's inventory NOW when the backend is linked (inspect_inventory op, ~8 s
+   * long-poll), else the newest stored snapshot marked {@code stale:true}. Transparent to the
+   * caller — no online/offline mode flag (plan D6 spirit).
+   */
+  getPlayerInventory = async (req: Request, res: Response): Promise<void> => {
+    const { server, player } = req.params as unknown as PlayerInvParams;
+    const identity = await serverResolver.resolve(server);
+    if (!identity.resolved) {
+      throw new ValidationError(`Unknown server '${server}'`);
+    }
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(player);
+    const target = isUuid ? { uuid: player } : { name: player };
+
+    if (biforestingLinkManager.getSessionByServer(server)) {
+      const { op } = await opsStore.create({
+        instanceKey: identity.instanceKey,
+        serverTag: identity.tag,
+        type: 'inspect_inventory',
+        params: {},
+        target,
+        createdBy: 'api:inventory',
+      });
+      await opDispatcher.onOpCreated(op);
+      const deadline = Date.now() + 8_000;
+      while (Date.now() < deadline) {
+        const doc = await opsStore.get(op._id);
+        if (!doc) break;
+        if (doc.state === 'completed') {
+          const result = doc.result as { data?: unknown } | null;
+          res.json({ data: { instanceKey: identity.instanceKey, source: 'live', stale: false, inventory: result?.data ?? null } });
+          return;
+        }
+        if (doc.state === 'waiting_player') {
+          await opsStore.cancel(op._id, 'api:inventory snapshot-fallback');
+          break;
+        }
+        if (doc.state === 'failed' || doc.state === 'expired' || doc.state === 'cancelled') {
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 250));
+      }
+    }
+
+    const snap = await latestSnapshot(identity.instanceKey, player);
+    if (!snap) throw new NotFoundError('Inventory', `${player} on ${identity.instanceKey}`);
+    res.json({ data: { instanceKey: identity.instanceKey, source: 'snapshot', stale: true, snapshot: snap } });
+  };
+
+  /** Newest-first snapshot headers for a player (no NBT blobs). */
+  listPlayerSnapshots = async (req: Request, res: Response): Promise<void> => {
+    const { server, player } = req.params as unknown as PlayerInvParams;
+    const identity = await serverResolver.resolve(server);
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(player);
+    let uuid = player;
+    if (!isUuid) {
+      const newest = await latestSnapshot(identity.instanceKey, player);
+      if (!newest) throw new NotFoundError('Snapshots', `${player} on ${identity.instanceKey}`);
+      uuid = newest.uuid;
+    }
+    const snapshots = await listSnapshots(identity.instanceKey, uuid);
+    res.json({ data: { instanceKey: identity.instanceKey, uuid, count: snapshots.length, snapshots } });
+  };
+
+  /** One snapshot incl. the full-fidelity NBT gz blob (base64) — display uses `items`, restore uses `gz`. */
+  getInventorySnapshot = async (req: Request, res: Response): Promise<void> => {
+    const { id } = req.params as unknown as SnapshotIdParams;
+    const snap = await getSnapshot(id);
+    if (!snap) throw new NotFoundError('Snapshot', id);
+    const { gz, ...rest } = snap;
+    res.json({ data: { ...rest, gzBase64: gz.buffer ? Buffer.from(gz.buffer).toString('base64') : null } });
   };
 
   /** Metrics v2: the live session's last sample, else the newest stored raw sample. */

@@ -1,5 +1,5 @@
 import { Reader, Writer } from './frame-codec.js';
-import type { LinkMetrics, RegistryPayload, QuestTeam, ChunkTeam, RegisterInfo, RegAck, OpResMsg, PresenceMsg } from './types.js';
+import type { LinkMetrics, RegistryPayload, QuestTeam, ChunkTeam, RegisterInfo, RegAck, OpResMsg, PresenceMsg, InvSnapHeader } from './types.js';
 
 /**
  * Payload decoders/encoders for the four link channels. Field order mirrors
@@ -183,6 +183,31 @@ export function decodePresence(payload: Buffer): PresenceMsg {
     event,
     player: (raw['player'] as PresenceMsg['player']) ?? null,
     online: (raw['online'] as PresenceMsg['online']) ?? null,
+  };
+}
+
+/** `biforesting:invsnap`: [varint ver=1][utf json header][varint gzLen][gz bytes]. */
+export function decodeInvSnap(payload: Buffer): { header: InvSnapHeader; gz: Buffer } {
+  const r = new Reader(payload);
+  const version = r.varInt();
+  if (version !== 1) throw new Error(`unsupported invsnap version ${version}`);
+  const raw = JSON.parse(r.utf()) as Record<string, unknown>;
+  if (typeof raw['uuid'] !== 'string' || typeof raw['name'] !== 'string') {
+    throw new Error('malformed invsnap header');
+  }
+  const gzLen = r.varInt();
+  const gz = r.bytes(gzLen);
+  return {
+    header: {
+      uuid: raw['uuid'],
+      name: raw['name'],
+      reason: typeof raw['reason'] === 'string' ? raw['reason'] : 'unknown',
+      dim: typeof raw['dim'] === 'string' ? raw['dim'] : '',
+      pos: Array.isArray(raw['pos']) ? (raw['pos'] as number[]) : [],
+      dataVersion: typeof raw['dataVersion'] === 'number' ? raw['dataVersion'] : 0,
+      items: Array.isArray(raw['items']) ? (raw['items'] as InvSnapHeader['items']) : [],
+    },
+    gz,
   };
 }
 

@@ -11,6 +11,8 @@ import {
   opIdParamsSchema,
   opListQuerySchema,
   metricsHistoryQuerySchema,
+  playerInvParamsSchema,
+  snapshotIdParamsSchema,
 } from './biforesting.schema.js';
 import { asyncHandler } from '../../shared/utils/async-handler.js';
 
@@ -61,6 +63,29 @@ biforestingRouter.get(
   apiKeyAuth(),
   validate({ params: linkServerParamsSchema, query: opListQuerySchema }),
   asyncHandler(controller.listOps),
+);
+
+// ── Inventory snapshots (phase 4, plan D12) ──────────────────────────────────
+
+biforestingRouter.get(
+  '/inventory-snapshots/:id',
+  apiKeyAuth(),
+  validate({ params: snapshotIdParamsSchema }),
+  asyncHandler(controller.getInventorySnapshot),
+);
+
+biforestingRouter.get(
+  '/:server/players/:player/inventory',
+  apiKeyAuth(),
+  validate({ params: playerInvParamsSchema }),
+  asyncHandler(controller.getPlayerInventory),
+);
+
+biforestingRouter.get(
+  '/:server/players/:player/inventory-snapshots',
+  apiKeyAuth(),
+  validate({ params: playerInvParamsSchema }),
+  asyncHandler(controller.listPlayerSnapshots),
 );
 
 // ── Metrics v2 (plan D13) ────────────────────────────────────────────────────

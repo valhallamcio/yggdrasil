@@ -199,6 +199,20 @@ function onOpen(sock) {
   }
   if (process.env.SEND_QUEST) sendUnit(sock, 'biforesting:quest', quest());
   if (process.env.SEND_CHUNKS) sendUnit(sock, 'biforesting:chunks', chunks());
+  if (process.env.SEND_INVSNAP) {
+    // [ver=1][utf json header][varint gzLen][gz] — gz bytes are opaque to yggdrasil
+    const header = utf(JSON.stringify({
+      uuid: '00000000-0000-0000-0000-000000000001',
+      name: 'TestPlayer',
+      reason: 'join',
+      dim: 'minecraft:overworld',
+      pos: [1.5, 64, -3.25],
+      dataVersion: 3955,
+      items: [{ slot: 0, id: 'minecraft:diamond', count: 12 }, { slot: 100, id: 'minecraft:ender_pearl', count: 3 }],
+    }));
+    const gz = Buffer.from([31, 139, 8, 0, 1, 2, 3, 4]);
+    sendUnit(sock, 'biforesting:invsnap', Buffer.concat([vint(1), header, vint(gz.length), gz]));
+  }
   sendUnit(sock, 'biforesting:metrics', metrics());
   setInterval(() => sendUnit(sock, 'biforesting:metrics', metrics()), 1000);
 }

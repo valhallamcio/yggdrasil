@@ -7,6 +7,7 @@ import { parseOuterUnits, Reassembler, MAX_INBOUND_FRAME } from './frame-codec.j
 import { biforestingLinkManager } from './link-manager.js';
 import { processOuterUnit } from './session-processor.js';
 import { ensureIndexes } from './persistence.js';
+import { ensureInvIndexes } from './inv-store.js';
 import { ensureMetricsIndexes, startDownsampleSweep } from './metrics-history.js';
 import { opDispatcher, opsStore } from './ops-runtime.js';
 
@@ -38,6 +39,7 @@ export class BiforestingLinkPlugin implements Plugin {
     await ensureIndexes();
     await opsStore.ensureIndexes();
     await ensureMetricsIndexes();
+    await ensureInvIndexes();
 
     // Durable ops: boot-reset stranded `dispatched` ops, start the recovery sweep, and route
     // op_res/presence/link-up through the dispatcher.

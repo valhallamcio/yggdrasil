@@ -2,6 +2,16 @@ import type { ObjectId } from 'mongodb';
 
 // ── Decoded UP payloads (mirror bifrost-lib/test/ygg_mock.py parsers) ─────────
 
+export interface InvSnapHeader {
+  uuid: string;
+  name: string;
+  reason: string;
+  dim: string;
+  pos: number[];
+  dataVersion: number;
+  items: Array<{ slot: number; id: string; count: number }>;
+}
+
 export interface DimMetrics {
   dim: string;
   tickMsAvg: number;

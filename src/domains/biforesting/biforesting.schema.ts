@@ -5,6 +5,17 @@ export const linkServerParamsSchema = z.object({
   server: z.string().min(1).max(64),
 });
 
+// ── Inventory snapshots (phase 4, plan D12) ──────────────────────────────────
+
+export const playerInvParamsSchema = z.object({
+  server: z.string().min(1).max(64),
+  player: z.string().min(1).max(36),
+});
+
+export const snapshotIdParamsSchema = z.object({
+  id: z.string().regex(/^[0-9a-f]{24}$/i, 'snapshot id must be a Mongo ObjectId'),
+});
+
 // ── Metrics history (v2, plan D13) ───────────────────────────────────────────
 
 export const metricsHistoryQuerySchema = z.object({
@@ -105,3 +116,5 @@ export type OpIdParams = z.infer<typeof opIdParamsSchema>;
 export type OpCreateBody = z.infer<typeof opCreateBodySchema>;
 export type OpListQuery = z.infer<typeof opListQuerySchema>;
 export type MetricsHistoryQuery = z.infer<typeof metricsHistoryQuerySchema>;
+export type PlayerInvParams = z.infer<typeof playerInvParamsSchema>;
+export type SnapshotIdParams = z.infer<typeof snapshotIdParamsSchema>;

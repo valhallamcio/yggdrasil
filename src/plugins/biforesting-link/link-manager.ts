@@ -2,7 +2,8 @@ import { eventBus } from '../../core/event-bus/index.js';
 import { logger } from '../../core/logger/index.js';
 import { getAuthKey } from './auth-key.js';
 import { encodeFrames, encodeOuterUnit } from './frame-codec.js';
-import { decodeMetrics, decodeRegistry, decodeQuest, decodeChunks, decodeRegister, decodeOpRes, decodePresence, encodeRegAck } from './decoders.js';
+import { decodeMetrics, decodeRegistry, decodeQuest, decodeChunks, decodeRegister, decodeOpRes, decodePresence, decodeInvSnap, encodeRegAck } from './decoders.js';
+import { saveInvSnapshot } from './inv-store.js';
 import { saveMetrics } from './metrics-history.js';
 import { saveRegistry, saveQuests, saveChunks } from './persistence.js';
 import { getPolicy, ZERO_POLICY } from './policy-store.js';
@@ -18,6 +19,7 @@ const QUEST = 'biforesting:quest';
 const CHUNKS = 'biforesting:chunks';
 const OP_RES = 'biforesting:op_res';
 const PRESENCE = 'biforesting:presence';
+const INVSNAP = 'biforesting:invsnap';
 
 /**
  * Where op_res/presence messages and link-up notifications go (the op dispatcher). Wired by the
@@ -182,6 +184,19 @@ class BiforestingLinkManager {
         break;
       case QUEST:
         await this.onQuest(s, payload);
+        break;
+      case INVSNAP:
+        if (s.identity?.resolved) {
+          const snap = decodeInvSnap(payload);
+          await saveInvSnapshot(s.identity, snap.header, snap.gz);
+          eventBus.emit('biforesting.inv.snapshot', {
+            instanceKey: s.identity.instanceKey,
+            uuid: snap.header.uuid,
+            name: snap.header.name,
+            reason: snap.header.reason,
+            sizeBytes: snap.gz.length,
+          });
+        }
         break;
       case CHUNKS:
         await this.onChunks(s, payload);

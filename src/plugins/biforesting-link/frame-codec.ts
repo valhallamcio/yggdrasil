@@ -109,6 +109,16 @@ export class Reader {
     return this.byte() !== 0;
   }
 
+  /** Raw byte run (copied — safe to hold after the frame buffer is reused). */
+  bytes(len: number): Buffer {
+    if (len < 0 || this.off + len > this.buf.length) {
+      throw new Error(`bytes(${len}) exceeds payload (${this.remaining()} left)`);
+    }
+    const out = Buffer.from(this.buf.subarray(this.off, this.off + len));
+    this.off += len;
+    return out;
+  }
+
   remaining(): number {
     return this.buf.length - this.off;
   }

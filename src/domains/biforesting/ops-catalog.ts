@@ -33,6 +33,12 @@ export const OPS_CATALOG: Record<string, OpCatalogEntry> = {
     risk: 'safe',
     description: '1.7.10 diagnostic: reflective getSubItems yield over the item registry (plan risk R1).',
   },
+  inspect_inventory: {
+    params: z.object({}).strict(),
+    serverGlobal: false,
+    risk: 'safe',
+    description: 'Display-ready item list for an online player; offline target parks as waiting_player (offline read lands in phase 5).',
+  },
 };
 
 export function catalogEntry(type: string): OpCatalogEntry | undefined {
