@@ -167,6 +167,27 @@ test('compound: resume rejects non-compound and non-failed ops', async () => {
   assert.equal(await stack.compound.resume(parent._id), null, 'pending parent is not resumable');
 });
 
+test('compound: REST-style cancel of a child checkpoints the parent (the controller calls onChildUpdate)', async () => {
+  const stack = mkStack('pack-d');
+  const parent = await mkParent('pack-d');
+  await stack.compound.expand(parent);
+
+  const childId = stack.port.sent[0]!.body['opId'] as string;
+  const cancelled = await store.cancel(childId, 'test');
+  assert.ok(cancelled);
+  await stack.compound.onChildUpdate(cancelled); // what cancelOp does after a successful cancel
+
+  const p = await store.get(parent._id);
+  assert.equal(p?.state, 'failed');
+  assert.match((p?.result as { error?: string })?.error ?? '', /child 0/);
+
+  // and the resume path revives it with a fresh child 0
+  const resumed = await stack.compound.resume(parent._id);
+  assert.equal(resumed?.state, 'pending');
+  assert.equal(stack.port.sent.length, 2);
+  assert.notEqual(stack.port.sent[1]!.body['opId'], childId);
+});
+
 test('compound: parent never appears in findDispatchable', async () => {
   const parent = await mkParent('pack-d');
   const dispatchable = await store.findDispatchable('pack-d');

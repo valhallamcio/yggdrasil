@@ -335,6 +335,9 @@ export class BiforestingController {
     if (!cancelled) {
       throw new ValidationError(`Op ${opId} is '${existing.state}' — only pending/dispatched/waiting_player ops can be cancelled`);
     }
+    // REST cancel bypasses the dispatcher's update hook — checkpoint the compound parent here
+    // (found live: cancelling a parked child left the parent pending forever).
+    await compoundOps.onChildUpdate(cancelled);
     res.json({ data: cancelled });
   };
 
