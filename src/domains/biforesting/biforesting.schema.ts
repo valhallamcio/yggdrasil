@@ -47,6 +47,8 @@ export const opCreateBodySchema = z.object({
     })
     .optional(),
   idempotencyKey: z.string().min(8).max(128).optional(),
+  /** Required by requiresDryRunConfirm catalog entries when applying (non-dry-run). */
+  confirmedFromDryRun: z.string().regex(/^[0-9A-HJKMNP-TV-Z]{26}$/).optional(),
   notBefore: z.coerce.date().optional(),
   expiresInMs: z.number().int().min(60_000).max(30 * 24 * 3600_000).optional(),
   maxAttempts: z.number().int().min(1).max(20).optional(),

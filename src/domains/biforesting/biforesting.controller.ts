@@ -7,7 +7,7 @@ import { latestSnapshot, listSnapshots, getSnapshot } from '../../plugins/bifore
 import { latestStored, rawHistory, hourlyHistory } from '../../plugins/biforesting-link/metrics-history.js';
 import { serverResolver } from '../../plugins/biforesting-link/server-resolver.js';
 import { NotFoundError, ValidationError } from '../../shared/errors/index.js';
-import { catalogEntry, OPS_CATALOG } from './ops-catalog.js';
+import { catalogEntry, dryRunConfirmError, OPS_CATALOG } from './ops-catalog.js';
 import type { LinkServerParams, PolicyPutBody, QuestDownBody, ChunksDownBody, OpCreateBody, OpIdParams, OpListQuery, MetricsHistoryQuery, PlayerInvParams, SnapshotIdParams } from './biforesting.schema.js';
 
 const QUEST_CHANNEL = 'biforesting:quest';
@@ -211,6 +211,33 @@ export class BiforestingController {
     const identity = await serverResolver.resolve(server);
     if (!identity.resolved) {
       throw new ValidationError(`Unknown server '${server}' — ops must target a resolvable server`);
+    }
+
+    // Destructive-apply guard (phase 5): a non-dry-run of a requiresDryRunConfirm type must
+    // reference a FRESH completed dry-run of the same type+target on the same instance, and a
+    // fresh pre-apply snapshot op is auto-prepended (best-effort restore point, plan D12).
+    if (entry.requiresDryRunConfirm && !body.flags?.dryRun) {
+      if (!body.confirmedFromDryRun) {
+        throw new ValidationError(`'${body.type}' apply requires confirmedFromDryRun (id of a completed dry-run)`);
+      }
+      const dry = await opsStore.get(body.confirmedFromDryRun);
+      const reason = dryRunConfirmError(dry, {
+        type: body.type,
+        instanceKey: identity.instanceKey,
+        target: body.target ?? null,
+      });
+      if (reason) {
+        throw new ValidationError(`confirmedFromDryRun rejected: ${reason}`);
+      }
+      const { op: snap } = await opsStore.create({
+        instanceKey: identity.instanceKey,
+        serverTag: identity.tag,
+        type: 'inspect_inventory',
+        params: {},
+        target: body.target ?? null,
+        createdBy: 'auto:pre-apply-snapshot',
+      });
+      void opDispatcher.onOpCreated(snap);
     }
 
     const createdBy = (req.headers['x-actor'] as string | undefined) ?? 'api';
