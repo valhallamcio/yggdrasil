@@ -53,6 +53,13 @@ biforestingRouter.post(
 );
 
 biforestingRouter.post(
+  '/ops/:opId/resume',
+  apiKeyAuth(),
+  validate({ params: opIdParamsSchema }),
+  asyncHandler(controller.resumeOp),
+);
+
+biforestingRouter.post(
   '/:server/ops',
   apiKeyAuth(),
   validate({ params: linkServerParamsSchema, body: opCreateBodySchema }),

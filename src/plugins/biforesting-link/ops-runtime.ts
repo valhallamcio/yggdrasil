@@ -1,5 +1,6 @@
 import { getDb } from '../../core/database/client.js';
 import { biforestingLinkManager } from './link-manager.js';
+import { CompoundOps } from './compound-ops.js';
 import { OpDispatcher } from './op-dispatcher.js';
 import { OpsStore } from './ops-store.js';
 
@@ -15,3 +16,6 @@ export const opDispatcher = new OpDispatcher(opsStore, {
   sendDown: (instanceKey, channel, payload) => biforestingLinkManager.sendDown(instanceKey, channel, payload),
   liveInstanceKeys: () => biforestingLinkManager.liveInstanceKeys(),
 });
+
+export const compoundOps = new CompoundOps(opsStore, opDispatcher);
+opDispatcher.setUpdateHook((op) => compoundOps.onChildUpdate(op));

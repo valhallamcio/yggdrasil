@@ -158,6 +158,8 @@ export interface OpFlags {
   /** How to handle an offline target: queue for login (default), offline-edit in-JVM, or reject. */
   offlineMode?: 'queue' | 'offline-edit' | 'reject';
   dryRun?: boolean;
+  /** Compound PARENT op (e.g. account_reset) — never wire-dispatched; children carry the work. */
+  compound?: boolean;
 }
 
 export interface OpAuditEntry {

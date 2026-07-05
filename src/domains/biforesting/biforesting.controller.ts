@@ -2,7 +2,8 @@ import type { Request, Response } from 'express';
 import { biforestingLinkManager } from '../../plugins/biforesting-link/link-manager.js';
 import { encodeQuestDown, encodeChunksDown } from '../../plugins/biforesting-link/decoders.js';
 import { getPolicy, setPolicy, maskForFeatures, featureNamesForMask } from '../../plugins/biforesting-link/policy-store.js';
-import { opDispatcher, opsStore } from '../../plugins/biforesting-link/ops-runtime.js';
+import { opDispatcher, opsStore, compoundOps } from '../../plugins/biforesting-link/ops-runtime.js';
+import { COMPOUND_TYPES } from '../../plugins/biforesting-link/compound-ops.js';
 import { latestSnapshot, listSnapshots, getSnapshot } from '../../plugins/biforesting-link/inv-store.js';
 import { searchQuests, questRegistryInfo } from '../../plugins/biforesting-link/quest-registry-store.js';
 import { latestStored, rawHistory, hourlyHistory } from '../../plugins/biforesting-link/metrics-history.js';
@@ -266,6 +267,7 @@ export class BiforestingController {
       void opDispatcher.onOpCreated(snap);
     }
 
+    const compound = body.type in COMPOUND_TYPES;
     const createdBy = (req.headers['x-actor'] as string | undefined) ?? 'api';
     const { op, replayed } = await opsStore.create({
       instanceKey: identity.instanceKey,
@@ -273,7 +275,7 @@ export class BiforestingController {
       type: body.type,
       params: parsed.data as Record<string, unknown>,
       target: body.target ?? null,
-      flags: body.flags ?? {},
+      flags: { ...(body.flags ?? {}), ...(compound ? { compound: true } : {}) },
       ...(body.idempotencyKey ? { idempotencyKey: body.idempotencyKey } : {}),
       notBefore: body.notBefore ?? null,
       ...(body.expiresInMs !== undefined ? { expiresInMs: body.expiresInMs } : {}),
@@ -283,9 +285,27 @@ export class BiforestingController {
       createdBy,
     });
 
-    if (!replayed) await opDispatcher.onOpCreated(op);
+    if (!replayed) {
+      if (compound) {
+        await compoundOps.expand(op); // parent never wire-dispatches; child 0 carries the work
+      } else {
+        await opDispatcher.onOpCreated(op);
+      }
+    }
     const current = (await opsStore.get(op._id)) ?? op;
     res.status(replayed ? 200 : 201).json({ data: { op: current, replayed } });
+  };
+
+  /** Resume a FAILED compound parent from its checkpoint (fresh child for the first incomplete step). */
+  resumeOp = async (req: Request, res: Response): Promise<void> => {
+    const { opId } = req.params as unknown as OpIdParams;
+    const existing = await opsStore.get(opId);
+    if (!existing) throw new NotFoundError('Op', opId);
+    const resumed = await compoundOps.resume(opId);
+    if (!resumed) {
+      throw new ValidationError(`Op ${opId} is not a resumable compound op (state '${existing.state}', compound=${existing.flags?.compound === true})`);
+    }
+    res.json({ data: resumed });
   };
 
   getOp = async (req: Request, res: Response): Promise<void> => {

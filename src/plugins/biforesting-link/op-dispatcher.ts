@@ -26,12 +26,18 @@ export interface OpSendPort {
  */
 export class OpDispatcher {
   private sweepTimer: NodeJS.Timeout | null = null;
+  private onUpdated: ((op: OpDoc) => Promise<void>) | null = null;
 
   constructor(
     private readonly store: OpsStore,
     private readonly port: OpSendPort,
     private readonly sweepIntervalMs = 15_000,
   ) {}
+
+  /** Compound orchestration hook — fired (fire-and-forget) on every emitted op update. */
+  setUpdateHook(hook: (op: OpDoc) => Promise<void>): void {
+    this.onUpdated = hook;
+  }
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -207,5 +213,8 @@ export class OpDispatcher {
       parentOpId: op.parentOpId,
       updatedAt: op.updatedAt,
     });
+    if (this.onUpdated) {
+      void this.onUpdated(op).catch((err) => logger.warn({ err, opId: op._id }, 'biforesting-ops: update hook failed'));
+    }
   }
 }

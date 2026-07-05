@@ -119,6 +119,41 @@ export const OPS_CATALOG: Record<string, OpCatalogEntry> = {
     risk: 'dangerous',
     description: 'Reset quest progress for a player — omitting questId resets ALL quests.',
   },
+  team_reset: {
+    params: z.object({}).strict(),
+    serverGlobal: false,
+    risk: 'dangerous',
+    description: 'Kick the player to a solo team (party owner → whole party force-disbanded; SU multi-member owner is refused). Transfer claims FIRST.',
+  },
+  claims_transfer: {
+    params: z.object({ holdTeam: z.string().min(1).max(64).optional() }).strict(),
+    serverGlobal: false,
+    risk: 'confirm',
+    description: "Move every claim of the player's team to the server-owned hold team (default 'valhallamc', created on demand) keeping force-load state (D15).",
+  },
+  claims_release: {
+    params: z.object({}).strict(),
+    serverGlobal: false,
+    risk: 'dangerous',
+    description: "Unclaim everything the player's team owns (prefer claims_transfer — no-grief default).",
+  },
+  inventory_clear: {
+    params: z.object({}).strict(),
+    serverGlobal: false,
+    risk: 'dangerous',
+    description: 'Empty main+armor+offhand+ender inventory of an ONLINE player (account_reset snapshots first).',
+  },
+  account_reset: {
+    params: z
+      .object({
+        holdTeam: z.string().min(1).max(64).optional(),
+        claims: z.enum(['transfer', 'release']).optional(),
+      })
+      .strict(),
+    serverGlobal: false,
+    risk: 'dangerous',
+    description: 'COMPOUND: snapshot → quest_reset(all) → claims transfer/release → team_reset → inventory_clear; fails at checkpoint, resumable via /ops/:id/resume.',
+  },
 };
 
 export const DRY_RUN_CONFIRM_WINDOW_MS = 15 * 60_000;

@@ -219,17 +219,35 @@ export class OpsStore {
     return n;
   }
 
-  /** Ops ready for dispatch on an instance: pending, notBefore satisfied, not expired. */
+  /** Ops ready for dispatch on an instance: pending, notBefore satisfied, not expired. Compound parents never dispatch. */
   async findDispatchable(instanceKey: string, now: Date = new Date()): Promise<OpDoc[]> {
     return this.col()
       .find({
         instanceKey,
         state: 'pending',
+        'flags.compound': { $ne: true },
         expiresAt: { $gt: now },
         $or: [{ notBefore: null }, { notBefore: { $lte: now } }],
       })
       .sort({ _id: 1 })
       .toArray();
+  }
+
+  // ── Compound parents (account_reset — children carry the work) ─────────────
+
+  /** All children of a compound parent, ordered by childIndex. */
+  async childrenOf(parentOpId: string): Promise<OpDoc[]> {
+    return this.col().find({ parentOpId }).sort({ childIndex: 1, _id: 1 }).toArray();
+  }
+
+  /** Compound parent success — parents live in `pending` while children run. */
+  async completeCompound(opId: string, result: OpResult): Promise<OpDoc | null> {
+    return this.transition(opId, 'pending', 'completed', { result, completedAt: new Date() }, 'all children completed');
+  }
+
+  /** failed → pending for /resume (a fresh child is spawned for the first incomplete step). */
+  async reopenCompound(opId: string): Promise<OpDoc | null> {
+    return this.transition(opId, 'failed', 'pending', { completedAt: null }, 'resumed');
   }
 
   /** `dispatched` ops whose ack never came back within dispatchTimeoutMs. */
