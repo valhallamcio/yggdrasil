@@ -72,16 +72,15 @@ test('dispatcher: pending op goes DOWN the live link as [varint][utf json] on bi
   assert.equal((await store.get(op._id))?.state, 'dispatched');
 });
 
-test('dispatcher: op for a dead link stays pending until link-up', async () => {
+test('dispatcher: op for a dead link eagerly rolls back to pending; link-up redelivers', async () => {
   const port = mkPort();
   const d = new OpDispatcher(store, port);
 
   const { op } = await store.create(mkInput('pack-down'));
   await d.onOpCreated(op);
-  // markDispatched succeeded but the write failed — sweep with a post-timeout clock requeues.
-  assert.equal((await store.get(op._id))?.state, 'dispatched');
-  await d.sweep(new Date(Date.now() + 60_000));
-  assert.equal((await store.get(op._id))?.state, 'pending', 'requeued by sweep');
+  // markDispatched won the CAS but the write failed — eager rollback, because link-up
+  // redispatch only considers `pending` (a stranded `dispatched` would wait for the sweep).
+  assert.equal((await store.get(op._id))?.state, 'pending', 'eagerly requeued');
 
   port.live.add('pack-down');
   await d.onLinkUp('pack-down');

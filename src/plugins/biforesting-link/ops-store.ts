@@ -255,6 +255,11 @@ export class OpsStore {
       .toArray();
   }
 
+  /** Eager rollback when the link write failed right after the pending→dispatched CAS. */
+  async requeueUnwritable(opId: string): Promise<OpDoc | null> {
+    return this.transition(opId, 'dispatched', 'pending', {}, 'link not writable at dispatch — eager requeue');
+  }
+
   /** Requeue a timed-out dispatch, or fail it once attempts are exhausted. */
   async requeueOrFail(op: OpDoc): Promise<OpDoc | null> {
     if (op.attempts >= op.maxAttempts) {

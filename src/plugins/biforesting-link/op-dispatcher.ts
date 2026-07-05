@@ -74,8 +74,9 @@ export class OpDispatcher {
 
   /**
    * Dispatch a single op: CAS pending→dispatched first, then write. If the write fails (link died
-   * between the check and the write) the op stays `dispatched` and the sweep re-queues it after
-   * dispatchTimeoutMs — safe, just slower than rolling back eagerly.
+   * between the check and the write) the op is eagerly rolled back to `pending` — left as
+   * `dispatched` it would ALSO miss the link-up redispatch (which only considers `pending`) and
+   * sit until the sweep (observed live: op created while gtnh was down showed `dispatched`).
    */
   private async dispatchOne(op: OpDoc): Promise<boolean> {
     // Gate BEFORE the pending→dispatched CAS: with the ops bit off the op must stay `pending`
@@ -96,7 +97,9 @@ export class OpDispatcher {
     });
     const ok = this.port.sendDown(dispatched.instanceKey, OP_CHANNEL, encodeJsonPayload(wire));
     if (!ok) {
-      logger.debug({ opId: op._id, instanceKey: op.instanceKey }, 'biforesting-ops: link gone mid-dispatch — sweep will requeue');
+      const requeued = await this.store.requeueUnwritable(dispatched._id);
+      if (requeued) this.emitUpdated(requeued);
+      logger.debug({ opId: op._id, instanceKey: op.instanceKey }, 'biforesting-ops: link gone mid-dispatch — eagerly requeued');
     }
     return ok;
   }

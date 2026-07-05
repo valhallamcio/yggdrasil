@@ -27,6 +27,12 @@ export const OPS_CATALOG: Record<string, OpCatalogEntry> = {
     risk: 'confirm',
     description: 'Run a console command on the backend with captured output.',
   },
+  registry_spike: {
+    params: z.object({}).strict(),
+    serverGlobal: true,
+    risk: 'safe',
+    description: '1.7.10 diagnostic: reflective getSubItems yield over the item registry (plan risk R1).',
+  },
 };
 
 export function catalogEntry(type: string): OpCatalogEntry | undefined {
