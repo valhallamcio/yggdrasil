@@ -97,8 +97,26 @@ function sendUnit(_sock, channel, payload) {
 // ── payload builders ─────────────────────────────────────────────────────────
 const metrics = () =>
   Buffer.concat([vint(1), f32(45 + Math.random() * 5), f32(20), vint(0), vint(3), vint(900), i64(120 * 1024 * 1024), i64(512 * 1024 * 1024)]);
-const registry = () =>
+// v1 registry (id→numericId only) — kept behind V1_REGISTRY for the v1-compat decode path.
+const registryV1 = () =>
   Buffer.concat([vint(1), vint(3), utf('minecraft:dirt'), vint(9), utf('minecraft:stone'), vint(1), utf('create:cogwheel'), vint(7777)]);
+// v2 item registry (phase 8): [ver=2][varint gzLen][gz utf8-json] — mirrors shared ItemRegistryPayloads.
+const registryV2 = () => {
+  const gz = gzipSync(Buffer.from(JSON.stringify({
+    source: 'forge-1.12',
+    count: 3,
+    complete: true,
+    stats: { enumerated: 3, variants: 4 },
+    items: [
+      { id: 'minecraft:stone', mod: 'minecraft', display: 'Stone', maxStack: 64 },
+      { id: 'minecraft:dirt', num: 3, mod: 'minecraft', display: 'Dirt', maxStack: 64 },
+      { id: 'gregtech:gt.metaitem.01', num: 4097, mod: 'gregtech', display: 'Meta Item', maxStack: 64,
+        variants: [{ meta: 32001, display: 'Copper Dust' }, { meta: 32002, display: 'Tin Dust' }] },
+    ],
+  }), 'utf8'));
+  return Buffer.concat([vint(2), vint(gz.length), gz]);
+};
+const registry = () => (process.env.V1_REGISTRY ? registryV1() : registryV2());
 const quest = () =>
   Buffer.concat([vint(1), vint(1), utf('11111111-2222-3333-4444-555555555555'), vint(3700), utf('{progress:[I;1,2,3]}')]);
 // register v2: [ver=2][utf serverId][utf hint][varint caps][utf node][utf gameAddr][i64 bootNonce][varint linkProto=2]

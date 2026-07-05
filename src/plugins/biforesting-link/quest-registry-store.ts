@@ -2,6 +2,7 @@ import type { Collection, Db } from 'mongodb';
 import { getDb } from '../../core/database/client.js';
 import { logger } from '../../core/logger/index.js';
 import type { LinkIdentity, QuestRegPayload } from './types.js';
+import { getPackLangMap, resolveLang } from './pack-lang-store.js';
 
 /**
  * Quest registry (phase 6): one doc per quest per instanceKey, replaced wholesale on every
@@ -50,6 +51,9 @@ export async function ensureQuestRegIndexes(): Promise<void> {
 export async function saveQuestRegistry(identity: LinkIdentity, payload: QuestRegPayload): Promise<void> {
   try {
     await ensureQuestRegIndexes();
+    // R2 fallback: resolve lang-key titles (nomifactory BQ ships client-only lang) once per dump
+    // so BQ search works there. No-op when no lang was uploaded for this pack.
+    const lang = await getPackLangMap(identity.tag);
     const dumpedAt = new Date();
     const docs: QuestRegistryDoc[] = payload.quests.map((q) => ({
       instanceKey: identity.instanceKey,
@@ -58,9 +62,9 @@ export async function saveQuestRegistry(identity: LinkIdentity, payload: QuestRe
       source: payload.source,
       questId: q.id,
       chapter: q.chapter,
-      chapterTitle: q.chapterTitle,
-      title: q.title,
-      subtitle: q.subtitle,
+      chapterTitle: resolveLang(lang, q.chapterTitle),
+      title: resolveLang(lang, q.title),
+      subtitle: resolveLang(lang, q.subtitle),
       taskCount: q.taskCount,
       tasks: q.tasks,
       dumpedAt,

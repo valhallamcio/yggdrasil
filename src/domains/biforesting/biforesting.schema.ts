@@ -23,6 +23,43 @@ export const questSearchQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20),
 });
 
+// ── Item registry search (phase 8) ──────────────────────────────────────────
+
+export const itemSearchQuerySchema = z.object({
+  search: z.string().min(1).max(128).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(25),
+});
+
+// ── Pack lang + icons (phase 8 pipeline) ─────────────────────────────────────
+
+export const packParamsSchema = z.object({
+  pack: z.string().min(1).max(64),
+});
+
+export const packIconParamsSchema = z.object({
+  pack: z.string().min(1).max(64),
+  id: z.string().min(1).max(256),
+});
+
+export const packLangBodySchema = z.object({
+  // key → value; big maps (thousands of entries) are fine — stored as one doc.
+  lang: z.record(z.string(), z.string()),
+});
+
+export const iconsUploadBodySchema = z.object({
+  // base64-encoded PNGs, chunked by the upload script (≤200/batch keeps a request well under the
+  // 16mb route limit; item icons are tiny — a 64px PNG is a few KB).
+  icons: z
+    .array(
+      z.object({
+        id: z.string().min(1).max(256),
+        pngBase64: z.string().min(1).max(262_144),
+      }),
+    )
+    .min(1)
+    .max(200),
+});
+
 // ── Metrics history (v2, plan D13) ───────────────────────────────────────────
 
 export const metricsHistoryQuerySchema = z.object({
@@ -128,3 +165,8 @@ export type MetricsHistoryQuery = z.infer<typeof metricsHistoryQuerySchema>;
 export type PlayerInvParams = z.infer<typeof playerInvParamsSchema>;
 export type SnapshotIdParams = z.infer<typeof snapshotIdParamsSchema>;
 export type QuestSearchQuery = z.infer<typeof questSearchQuerySchema>;
+export type ItemSearchQuery = z.infer<typeof itemSearchQuerySchema>;
+export type PackParams = z.infer<typeof packParamsSchema>;
+export type PackIconParams = z.infer<typeof packIconParamsSchema>;
+export type PackLangBody = z.infer<typeof packLangBodySchema>;
+export type IconsUploadBody = z.infer<typeof iconsUploadBodySchema>;

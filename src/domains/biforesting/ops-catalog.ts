@@ -35,6 +35,12 @@ export const OPS_CATALOG: Record<string, OpCatalogEntry> = {
     risk: 'safe',
     description: '1.7.10 diagnostic: reflective getSubItems yield over the item registry (plan risk R1).',
   },
+  pull_item_registry: {
+    params: z.object({}).strict(),
+    serverGlobal: true,
+    risk: 'safe',
+    description: 'Re-dump the item registry (id/mod/display/maxStack + metaitem variants) to Yggdrasil — also fired automatically on CAP_REGISTRY_EXPORT grant. The registry is frozen at boot, so a re-dump is only needed after a pack update.',
+  },
   inspect_inventory: {
     params: z.object({}).strict(),
     serverGlobal: false,

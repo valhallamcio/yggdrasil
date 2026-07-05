@@ -2,11 +2,12 @@ import { eventBus } from '../../core/event-bus/index.js';
 import { logger } from '../../core/logger/index.js';
 import { getAuthKey } from './auth-key.js';
 import { encodeFrames, encodeOuterUnit } from './frame-codec.js';
-import { decodeMetrics, decodeRegistry, decodeQuest, decodeChunks, decodeRegister, decodeOpRes, decodePresence, decodeInvSnap, decodeQuestReg, encodeRegAck } from './decoders.js';
+import { decodeMetrics, decodeItemRegistry, decodeQuest, decodeChunks, decodeRegister, decodeOpRes, decodePresence, decodeInvSnap, decodeQuestReg, encodeRegAck } from './decoders.js';
 import { saveInvSnapshot } from './inv-store.js';
 import { saveQuestRegistry } from './quest-registry-store.js';
 import { saveMetrics } from './metrics-history.js';
-import { saveRegistry, saveQuests, saveChunks } from './persistence.js';
+import { saveQuests, saveChunks } from './persistence.js';
+import { saveItemRegistry } from './item-registry-store.js';
 import { getPolicy, ZERO_POLICY } from './policy-store.js';
 import { serverResolver } from './server-resolver.js';
 import type { LinkIdentity, LinkMetrics, LinkSnapshot, LinkSessionSnapshot, OpResMsg, PresenceMsg, RegisterInfo } from './types.js';
@@ -396,11 +397,15 @@ class BiforestingLinkManager {
   }
 
   private async onRegistry(s: Session, payload: Buffer): Promise<void> {
-    const reg = decodeRegistry(payload);
+    // Phase 8: item registry v2 (searchable). v1 senders decode into the same shape.
+    const reg = decodeItemRegistry(payload);
     s.registryCount = reg.count;
-    if (s.identity) {
-      await saveRegistry(s.identity, reg);
-      logger.info({ instanceKey: s.identity.instanceKey, count: reg.count }, 'biforesting-link: registry ingested');
+    if (s.identity?.resolved) {
+      await saveItemRegistry(s.identity, reg);
+      logger.info(
+        { instanceKey: s.identity.instanceKey, count: reg.count, source: reg.source, complete: reg.complete },
+        'biforesting-link: item registry ingested',
+      );
       this.emitData(s, 'registry', reg.count);
     }
   }

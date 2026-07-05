@@ -3,6 +3,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { startTestMongo, type TestMongo } from '../helpers/mongo.ts';
+import { setPackLangDbProvider, savePackLang } from '../../src/plugins/biforesting-link/pack-lang-store.ts';
 import {
   setQuestRegDbProvider,
   saveQuestRegistry,
@@ -29,6 +30,7 @@ function payload(source: string, quests: QuestRegRow[]): QuestRegPayload {
 before(async () => {
   mongo = await startTestMongo();
   setQuestRegDbProvider(() => mongo.client.db(DB));
+  setPackLangDbProvider(() => mongo.client.db(DB));
 });
 after(async () => mongo.stop());
 
@@ -81,6 +83,25 @@ test('questreg-store: search resolves exact id, text words, and partial substrin
 
   // no search string lists the registry
   assert.equal((await searchQuests('pack-s', undefined)).length, 3);
+});
+
+test('questreg-store: uploaded pack lang resolves lang-key titles at ingest (R2, nomifactory BQ)', async () => {
+  // nomifactory ships BQ titles as lang KEYS (client-only lang) — a raw dump stores the keys
+  await savePackLang('nomi', {
+    'nomifactory.quest.5.title': 'Getting Started',
+    'nomifactory.quest.5.subtitle': 'Punch a tree',
+  });
+  await saveQuestRegistry(identity('nomi'), payload('bq', [
+    quest('5', 'nomifactory.quest.5.title', { subtitle: 'nomifactory.quest.5.subtitle' }),
+    quest('6', 'Already English'), // untouched
+  ]));
+
+  const byWord = await searchQuests('nomi', 'Getting Started');
+  assert.equal(byWord[0]?.questId, '5', 'lang-key title resolved and searchable');
+  const byId = await searchQuests('nomi', '5');
+  assert.equal(byId[0]?.title, 'Getting Started', 'stored title is the resolved text');
+  assert.equal(byId[0]?.subtitle, 'Punch a tree');
+  assert.equal((await searchQuests('nomi', '6'))[0]?.title, 'Already English', 'non-key title untouched');
 });
 
 test('questreg-store: instances are isolated', async () => {

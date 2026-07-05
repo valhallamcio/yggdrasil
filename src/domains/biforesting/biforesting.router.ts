@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Router, json } from 'express';
 import { BiforestingController } from './biforesting.controller.js';
 import { validate } from '../../middleware/validate.js';
 import { apiKeyAuth } from '../../middleware/auth/api-key.js';
@@ -14,6 +14,11 @@ import {
   playerInvParamsSchema,
   snapshotIdParamsSchema,
   questSearchQuerySchema,
+  itemSearchQuerySchema,
+  packParamsSchema,
+  packIconParamsSchema,
+  packLangBodySchema,
+  iconsUploadBodySchema,
 } from './biforesting.schema.js';
 import { asyncHandler } from '../../shared/utils/async-handler.js';
 
@@ -32,6 +37,38 @@ biforestingRouter.get(
   apiKeyAuth(),
   validate({ params: linkServerParamsSchema }),
   controller.getLinkOne,
+);
+
+// ── Pack lang + icon pipeline (literal /packs routes BEFORE /:server) ───────
+
+biforestingRouter.put(
+  '/packs/:pack/lang',
+  apiKeyAuth(),
+  json({ limit: '8mb' }), // lang maps run to thousands of entries
+  validate({ params: packParamsSchema, body: packLangBodySchema }),
+  asyncHandler(controller.putPackLang),
+);
+
+biforestingRouter.post(
+  '/packs/:pack/icons',
+  apiKeyAuth(),
+  json({ limit: '16mb' }), // a batch of base64 PNGs
+  validate({ params: packParamsSchema, body: iconsUploadBodySchema }),
+  asyncHandler(controller.postPackIcons),
+);
+
+biforestingRouter.get(
+  '/packs/:pack/icons',
+  apiKeyAuth(),
+  validate({ params: packParamsSchema }),
+  asyncHandler(controller.getPackIconInfo),
+);
+
+biforestingRouter.get(
+  '/packs/:pack/icons/:id',
+  apiKeyAuth(),
+  validate({ params: packIconParamsSchema }),
+  asyncHandler(controller.getPackIcon),
 );
 
 // ── Durable ops (literal /ops routes BEFORE /:server) ───────────────────────
@@ -103,6 +140,15 @@ biforestingRouter.get(
   apiKeyAuth(),
   validate({ params: linkServerParamsSchema, query: questSearchQuerySchema }),
   asyncHandler(controller.searchQuests),
+);
+
+// ── Item registry (phase 8) ──────────────────────────────────────────────────
+
+biforestingRouter.get(
+  '/:server/items',
+  apiKeyAuth(),
+  validate({ params: linkServerParamsSchema, query: itemSearchQuerySchema }),
+  asyncHandler(controller.searchItems),
 );
 
 // ── Metrics v2 (plan D13) ────────────────────────────────────────────────────

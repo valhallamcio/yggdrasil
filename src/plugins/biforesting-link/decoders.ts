@@ -1,6 +1,6 @@
 import { gunzipSync } from 'node:zlib';
 import { Reader, Writer } from './frame-codec.js';
-import type { LinkMetrics, RegistryPayload, QuestTeam, ChunkTeam, RegisterInfo, RegAck, OpResMsg, PresenceMsg, InvSnapHeader, QuestRegPayload, QuestRegRow } from './types.js';
+import type { LinkMetrics, RegistryPayload, QuestTeam, ChunkTeam, RegisterInfo, RegAck, OpResMsg, PresenceMsg, InvSnapHeader, QuestRegPayload, QuestRegRow, ItemRegPayload, ItemRegRow, ItemVariant } from './types.js';
 
 /**
  * Payload decoders/encoders for the four link channels. Field order mirrors
@@ -63,6 +63,64 @@ export function decodeRegistry(payload: Buffer): RegistryPayload {
     entries[i] = { id, numericId };
   }
   return { count, entries };
+}
+
+/**
+ * `biforesting:registry` — version-aware (phase 8). v2 = `[varint 2][varint gzLen][gz utf8-json]`
+ * (`{source, count, complete, stats?, items:[{id, num?, mod, display, maxStack, variants?}]}`);
+ * v1 = `[varint 1][varint count][{utf id}{varint num}]…` (id→numericId only), decoded into the
+ * same shape (empty display/variants, `complete:true`, `source:'legacy'`) so the store is
+ * version-agnostic. Packs ship thousands of items → v2 always travels gzipped.
+ */
+export function decodeItemRegistry(payload: Buffer): ItemRegPayload {
+  const r = new Reader(payload);
+  const version = r.varInt();
+  if (version === 1) {
+    const count = r.varInt();
+    const items: ItemRegRow[] = new Array<ItemRegRow>(count);
+    for (let i = 0; i < count; i++) {
+      const id = r.utf();
+      const num = r.varInt();
+      items[i] = { id, num, mod: namespaceOf(id), display: '', maxStack: 0, variants: [] };
+    }
+    return { version: 1, source: 'legacy', complete: true, count, items };
+  }
+  if (version !== 2) throw new Error(`unsupported registry version ${version}`);
+  const gzLen = r.varInt();
+  const gz = r.bytes(gzLen);
+  const raw = JSON.parse(gunzipSync(gz).toString('utf8')) as Record<string, unknown>;
+  const rows = Array.isArray(raw['items']) ? (raw['items'] as Array<Record<string, unknown>>) : [];
+  const items: ItemRegRow[] = rows
+    .filter((it) => typeof it['id'] === 'string' && it['id'].length > 0)
+    .map((it) => {
+      const id = it['id'] as string;
+      const variantsRaw = Array.isArray(it['variants']) ? (it['variants'] as Array<Record<string, unknown>>) : [];
+      const variants: ItemVariant[] = variantsRaw.map((v) => ({
+        meta: typeof v['meta'] === 'number' ? v['meta'] : 0,
+        display: typeof v['display'] === 'string' ? v['display'] : '',
+      }));
+      return {
+        id,
+        num: typeof it['num'] === 'number' ? it['num'] : 0,
+        mod: typeof it['mod'] === 'string' && it['mod'] ? it['mod'] : namespaceOf(id),
+        display: typeof it['display'] === 'string' ? it['display'] : '',
+        maxStack: typeof it['maxStack'] === 'number' ? it['maxStack'] : 0,
+        variants,
+      };
+    });
+  return {
+    version: 2,
+    source: typeof raw['source'] === 'string' ? raw['source'] : 'unknown',
+    complete: raw['complete'] !== false,
+    count: typeof raw['count'] === 'number' ? raw['count'] : items.length,
+    items,
+    stats: typeof raw['stats'] === 'object' && raw['stats'] !== null ? (raw['stats'] as Record<string, number>) : undefined,
+  };
+}
+
+function namespaceOf(id: string): string {
+  const colon = id.indexOf(':');
+  return colon > 0 ? id.slice(0, colon) : 'minecraft';
 }
 
 export function decodeQuest(payload: Buffer): QuestTeam[] {

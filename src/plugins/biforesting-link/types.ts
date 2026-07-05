@@ -63,6 +63,35 @@ export interface RegistryPayload {
   entries: RegistryEntry[];
 }
 
+/** One metaitem variant of an {@link ItemRegRow} (legacy `item:meta`); absent on modern items. */
+export interface ItemVariant {
+  meta: number;
+  display: string;
+}
+
+/** One item row from a `biforesting:registry` v2 dump (phase 8). */
+export interface ItemRegRow {
+  id: string;
+  num: number; // legacy numeric id (0 on modern, where ids are strings)
+  mod: string;
+  display: string;
+  maxStack: number;
+  variants: ItemVariant[];
+}
+
+/**
+ * Decoded `biforesting:registry` payload. v1 senders (id→numericId only) decode into the same
+ * shape with `complete:true`, empty display/variants — so downstream code is version-agnostic.
+ */
+export interface ItemRegPayload {
+  version: number;
+  source: string; // 'modern' | 'forge-1.12' | 'forge-1.7' | 'legacy' (v1)
+  complete: boolean; // false = best-effort dump (1.7.10 per R1)
+  count: number;
+  items: ItemRegRow[];
+  stats?: Record<string, number>;
+}
+
 export interface QuestTeam {
   teamId: string;
   dataVersion: number;

@@ -6,11 +6,14 @@ import { opDispatcher, opsStore, compoundOps } from '../../plugins/biforesting-l
 import { COMPOUND_TYPES } from '../../plugins/biforesting-link/compound-ops.js';
 import { latestSnapshot, listSnapshots, getSnapshot } from '../../plugins/biforesting-link/inv-store.js';
 import { searchQuests, questRegistryInfo } from '../../plugins/biforesting-link/quest-registry-store.js';
+import { searchItems, itemRegistryInfo } from '../../plugins/biforesting-link/item-registry-store.js';
+import { savePackLang } from '../../plugins/biforesting-link/pack-lang-store.js';
+import { saveIcons, getIcon, iconInfo } from '../../plugins/biforesting-link/icon-store.js';
 import { latestStored, rawHistory, hourlyHistory } from '../../plugins/biforesting-link/metrics-history.js';
 import { serverResolver } from '../../plugins/biforesting-link/server-resolver.js';
 import { NotFoundError, ValidationError } from '../../shared/errors/index.js';
 import { catalogEntry, dryRunConfirmError, OPS_CATALOG } from './ops-catalog.js';
-import type { LinkServerParams, PolicyPutBody, QuestDownBody, ChunksDownBody, OpCreateBody, OpIdParams, OpListQuery, MetricsHistoryQuery, PlayerInvParams, SnapshotIdParams, QuestSearchQuery } from './biforesting.schema.js';
+import type { LinkServerParams, PolicyPutBody, QuestDownBody, ChunksDownBody, OpCreateBody, OpIdParams, OpListQuery, MetricsHistoryQuery, PlayerInvParams, SnapshotIdParams, QuestSearchQuery, ItemSearchQuery, PackParams, PackIconParams, PackLangBody, IconsUploadBody } from './biforesting.schema.js';
 
 const QUEST_CHANNEL = 'biforesting:quest';
 const CHUNKS_CHANNEL = 'biforesting:chunks';
@@ -125,6 +128,69 @@ export class BiforestingController {
         quests,
       },
     });
+  };
+
+  /**
+   * Item registry search (phase 8) — feeds VU's /give-item autocomplete. Exact-id hit wins, then
+   * a `mod:` prefix lists a mod's items, then $text relevance, then substring; no `search` lists
+   * id-sorted. `complete:false` on the meta = a best-effort (1.7.10) list, not exhaustive.
+   */
+  searchItems = async (req: Request, res: Response): Promise<void> => {
+    const { server } = req.params as unknown as LinkServerParams;
+    const { search, limit } = req.query as unknown as ItemSearchQuery;
+    const identity = await serverResolver.resolve(server);
+    if (!identity.resolved) {
+      throw new ValidationError(`Unknown server '${server}'`);
+    }
+    const info = await itemRegistryInfo(identity.instanceKey);
+    const items = await searchItems(identity.instanceKey, search, limit);
+    res.json({
+      data: {
+        instanceKey: identity.instanceKey,
+        source: info.source,
+        registryCount: info.count,
+        dumpedAt: info.dumpedAt,
+        count: items.length,
+        items,
+      },
+    });
+  };
+
+  /**
+   * Upload a pack's `en_us` lang map (phase 8, R2). Resolves lang-key quest/item titles at the
+   * NEXT dump — after uploading, re-trigger `pull_item_registry`/`pull_quest_registry` (or wait
+   * for the grant-time re-dump) so search picks up the real words. Keyed by pack (== server tag).
+   */
+  putPackLang = async (req: Request, res: Response): Promise<void> => {
+    const { pack } = req.params as unknown as PackParams;
+    const { lang } = req.body as PackLangBody;
+    const count = await savePackLang(pack, lang);
+    res.json({ data: { pack, entries: count } });
+  };
+
+  /** Upload a batch of item-icon PNGs for a pack (auditable; sha-deduped in GridFS). */
+  postPackIcons = async (req: Request, res: Response): Promise<void> => {
+    const { pack } = req.params as unknown as PackParams;
+    const { icons } = req.body as IconsUploadBody;
+    const uploads = icons.map((i) => ({ id: i.id, png: Buffer.from(i.pngBase64, 'base64') }));
+    const result = await saveIcons(pack, uploads);
+    res.json({ data: { pack, ...result } });
+  };
+
+  /** Coverage summary for a pack's icons. */
+  getPackIconInfo = async (req: Request, res: Response): Promise<void> => {
+    const { pack } = req.params as unknown as PackParams;
+    res.json({ data: { pack, ...(await iconInfo(pack)) } });
+  };
+
+  /** Serve one item icon PNG (pack + id). 404 when unmapped. */
+  getPackIcon = async (req: Request, res: Response): Promise<void> => {
+    const { pack, id } = req.params as unknown as PackIconParams;
+    const png = await getIcon(pack, id);
+    if (!png) throw new NotFoundError('Icon', `${pack}/${id}`);
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.send(png);
   };
 
   /** Metrics v2: the live session's last sample, else the newest stored raw sample. */
