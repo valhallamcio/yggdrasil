@@ -1,5 +1,6 @@
+import { gunzipSync } from 'node:zlib';
 import { Reader, Writer } from './frame-codec.js';
-import type { LinkMetrics, RegistryPayload, QuestTeam, ChunkTeam, RegisterInfo, RegAck, OpResMsg, PresenceMsg, InvSnapHeader } from './types.js';
+import type { LinkMetrics, RegistryPayload, QuestTeam, ChunkTeam, RegisterInfo, RegAck, OpResMsg, PresenceMsg, InvSnapHeader, QuestRegPayload, QuestRegRow } from './types.js';
 
 /**
  * Payload decoders/encoders for the four link channels. Field order mirrors
@@ -208,6 +209,37 @@ export function decodeInvSnap(payload: Buffer): { header: InvSnapHeader; gz: Buf
       items: Array.isArray(raw['items']) ? (raw['items'] as InvSnapHeader['items']) : [],
     },
     gz,
+  };
+}
+
+/**
+ * `biforesting:questreg`: [varint ver=1][varint gzLen][gz utf8-json] — the gz JSON is
+ * `{source, count, quests:[{id, chapter, chapterTitle, title, subtitle, taskCount, tasks[]}]}`.
+ * Packs ship thousands of quests, so the registry always travels compressed.
+ */
+export function decodeQuestReg(payload: Buffer): QuestRegPayload {
+  const r = new Reader(payload);
+  const version = r.varInt();
+  if (version !== 1) throw new Error(`unsupported questreg version ${version}`);
+  const gzLen = r.varInt();
+  const gz = r.bytes(gzLen);
+  const raw = JSON.parse(gunzipSync(gz).toString('utf8')) as Record<string, unknown>;
+  const rows = Array.isArray(raw['quests']) ? (raw['quests'] as Array<Record<string, unknown>>) : [];
+  const quests: QuestRegRow[] = rows
+    .filter((q) => typeof q['id'] === 'string' && q['id'].length > 0)
+    .map((q) => ({
+      id: q['id'] as string,
+      chapter: typeof q['chapter'] === 'string' ? q['chapter'] : '',
+      chapterTitle: typeof q['chapterTitle'] === 'string' ? q['chapterTitle'] : '',
+      title: typeof q['title'] === 'string' ? q['title'] : '',
+      subtitle: typeof q['subtitle'] === 'string' ? q['subtitle'] : '',
+      taskCount: typeof q['taskCount'] === 'number' ? q['taskCount'] : 0,
+      tasks: Array.isArray(q['tasks']) ? (q['tasks'] as string[]) : [],
+    }));
+  return {
+    source: typeof raw['source'] === 'string' ? raw['source'] : 'unknown',
+    count: typeof raw['count'] === 'number' ? raw['count'] : quests.length,
+    quests,
   };
 }
 

@@ -12,6 +12,23 @@ export interface InvSnapHeader {
   items: Array<{ slot: number; id: string; count: number }>;
 }
 
+/** One quest row from a `biforesting:questreg` dump (phase 6). Ids are opaque strings (FTBQ hex longs / BQ ints). */
+export interface QuestRegRow {
+  id: string;
+  chapter: string;
+  chapterTitle: string;
+  title: string;
+  subtitle: string;
+  taskCount: number;
+  tasks: string[];
+}
+
+export interface QuestRegPayload {
+  source: string; // 'ftbq' | 'bq'
+  count: number;
+  quests: QuestRegRow[];
+}
+
 export interface DimMetrics {
   dim: string;
   tickMsAvg: number;

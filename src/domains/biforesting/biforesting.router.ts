@@ -13,6 +13,7 @@ import {
   metricsHistoryQuerySchema,
   playerInvParamsSchema,
   snapshotIdParamsSchema,
+  questSearchQuerySchema,
 } from './biforesting.schema.js';
 import { asyncHandler } from '../../shared/utils/async-handler.js';
 
@@ -86,6 +87,15 @@ biforestingRouter.get(
   apiKeyAuth(),
   validate({ params: playerInvParamsSchema }),
   asyncHandler(controller.listPlayerSnapshots),
+);
+
+// ── Quest registry (phase 6) ─────────────────────────────────────────────────
+
+biforestingRouter.get(
+  '/:server/quests',
+  apiKeyAuth(),
+  validate({ params: linkServerParamsSchema, query: questSearchQuerySchema }),
+  asyncHandler(controller.searchQuests),
 );
 
 // ── Metrics v2 (plan D13) ────────────────────────────────────────────────────

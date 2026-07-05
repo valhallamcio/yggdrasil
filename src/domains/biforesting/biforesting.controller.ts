@@ -4,11 +4,12 @@ import { encodeQuestDown, encodeChunksDown } from '../../plugins/biforesting-lin
 import { getPolicy, setPolicy, maskForFeatures, featureNamesForMask } from '../../plugins/biforesting-link/policy-store.js';
 import { opDispatcher, opsStore } from '../../plugins/biforesting-link/ops-runtime.js';
 import { latestSnapshot, listSnapshots, getSnapshot } from '../../plugins/biforesting-link/inv-store.js';
+import { searchQuests, questRegistryInfo } from '../../plugins/biforesting-link/quest-registry-store.js';
 import { latestStored, rawHistory, hourlyHistory } from '../../plugins/biforesting-link/metrics-history.js';
 import { serverResolver } from '../../plugins/biforesting-link/server-resolver.js';
 import { NotFoundError, ValidationError } from '../../shared/errors/index.js';
 import { catalogEntry, dryRunConfirmError, OPS_CATALOG } from './ops-catalog.js';
-import type { LinkServerParams, PolicyPutBody, QuestDownBody, ChunksDownBody, OpCreateBody, OpIdParams, OpListQuery, MetricsHistoryQuery, PlayerInvParams, SnapshotIdParams } from './biforesting.schema.js';
+import type { LinkServerParams, PolicyPutBody, QuestDownBody, ChunksDownBody, OpCreateBody, OpIdParams, OpListQuery, MetricsHistoryQuery, PlayerInvParams, SnapshotIdParams, QuestSearchQuery } from './biforesting.schema.js';
 
 const QUEST_CHANNEL = 'biforesting:quest';
 const CHUNKS_CHANNEL = 'biforesting:chunks';
@@ -98,6 +99,31 @@ export class BiforestingController {
     if (!snap) throw new NotFoundError('Snapshot', id);
     const { gz, ...rest } = snap;
     res.json({ data: { ...rest, gzBase64: gz.buffer ? Buffer.from(gz.buffer).toString('base64') : null } });
+  };
+
+  /**
+   * Quest registry search (phase 6) — the "I don't know the quest ID" endpoint. Exact-id hit
+   * wins, then $text relevance, then substring fallback; no `search` lists in chapter order.
+   */
+  searchQuests = async (req: Request, res: Response): Promise<void> => {
+    const { server } = req.params as unknown as LinkServerParams;
+    const { search, limit } = req.query as unknown as QuestSearchQuery;
+    const identity = await serverResolver.resolve(server);
+    if (!identity.resolved) {
+      throw new ValidationError(`Unknown server '${server}'`);
+    }
+    const info = await questRegistryInfo(identity.instanceKey);
+    const quests = await searchQuests(identity.instanceKey, search, limit);
+    res.json({
+      data: {
+        instanceKey: identity.instanceKey,
+        source: info.source,
+        registryCount: info.count,
+        dumpedAt: info.dumpedAt,
+        count: quests.length,
+        quests,
+      },
+    });
   };
 
   /** Metrics v2: the live session's last sample, else the newest stored raw sample. */

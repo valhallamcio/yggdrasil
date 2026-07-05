@@ -24,6 +24,7 @@
  */
 import net from 'node:net';
 import { createHmac, pbkdf2Sync, randomBytes } from 'node:crypto';
+import { gzipSync } from 'node:zlib';
 import WebSocket from 'ws';
 
 const args = process.argv.slice(2);
@@ -212,6 +213,18 @@ function onOpen(sock) {
     }));
     const gz = Buffer.from([31, 139, 8, 0, 1, 2, 3, 4]);
     sendUnit(sock, 'biforesting:invsnap', Buffer.concat([vint(1), header, vint(gz.length), gz]));
+  }
+  if (process.env.SEND_QUESTREG) {
+    // [ver=1][varint gzLen][gz utf8-json] — mirrors shared QuestRegistryPayloads (phase 6)
+    const gz = gzipSync(Buffer.from(JSON.stringify({
+      source: 'ftbq',
+      count: 2,
+      quests: [
+        { id: '00000000000001A4', chapter: '1', chapterTitle: 'Getting Started', title: 'Craft a Furnace', subtitle: 'smelt things', taskCount: 1, tasks: ['ItemTask'] },
+        { id: '00000000000001A5', chapter: '1', chapterTitle: 'Getting Started', title: 'Advanced Circuits', subtitle: '', taskCount: 0, tasks: [] },
+      ],
+    }), 'utf8'));
+    sendUnit(sock, 'biforesting:questreg', Buffer.concat([vint(1), vint(gz.length), gz]));
   }
   sendUnit(sock, 'biforesting:metrics', metrics());
   setInterval(() => sendUnit(sock, 'biforesting:metrics', metrics()), 1000);

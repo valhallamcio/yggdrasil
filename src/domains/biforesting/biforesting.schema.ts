@@ -16,6 +16,13 @@ export const snapshotIdParamsSchema = z.object({
   id: z.string().regex(/^[0-9a-f]{24}$/i, 'snapshot id must be a Mongo ObjectId'),
 });
 
+// ── Quest registry search (phase 6) ─────────────────────────────────────────
+
+export const questSearchQuerySchema = z.object({
+  search: z.string().min(1).max(128).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+});
+
 // ── Metrics history (v2, plan D13) ───────────────────────────────────────────
 
 export const metricsHistoryQuerySchema = z.object({
@@ -120,3 +127,4 @@ export type OpListQuery = z.infer<typeof opListQuerySchema>;
 export type MetricsHistoryQuery = z.infer<typeof metricsHistoryQuerySchema>;
 export type PlayerInvParams = z.infer<typeof playerInvParamsSchema>;
 export type SnapshotIdParams = z.infer<typeof snapshotIdParamsSchema>;
+export type QuestSearchQuery = z.infer<typeof questSearchQuerySchema>;

@@ -95,6 +95,30 @@ export const OPS_CATALOG: Record<string, OpCatalogEntry> = {
     risk: 'confirm',
     description: 'Set a player gamemode (spectator rejected by 1.7.10 backends).',
   },
+  pull_quest_registry: {
+    params: z.object({}).strict(),
+    serverGlobal: true,
+    risk: 'safe',
+    description: 'Re-dump the quest registry (FTBQ/BQ) to Yggdrasil — also fired automatically on CAP_QUEST_OPS grant.',
+  },
+  quest_complete: {
+    params: z.object({ questId: z.string().min(1).max(64) }).strict(),
+    serverGlobal: false,
+    risk: 'confirm',
+    description: 'Complete a quest for a player (command fallback, output captured; offline target parks as waiting_player).',
+  },
+  task_complete: {
+    params: z.object({ questId: z.string().min(1).max(64) }).strict(),
+    serverGlobal: false,
+    risk: 'confirm',
+    description: 'Complete a single task by its id (FTBQ task ids share the quest id space; BQ treats it as quest complete).',
+  },
+  quest_reset: {
+    params: z.object({ questId: z.string().min(1).max(64).optional() }).strict(),
+    serverGlobal: false,
+    risk: 'dangerous',
+    description: 'Reset quest progress for a player — omitting questId resets ALL quests.',
+  },
 };
 
 export const DRY_RUN_CONFIRM_WINDOW_MS = 15 * 60_000;

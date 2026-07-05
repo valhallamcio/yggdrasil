@@ -2,8 +2,9 @@ import { eventBus } from '../../core/event-bus/index.js';
 import { logger } from '../../core/logger/index.js';
 import { getAuthKey } from './auth-key.js';
 import { encodeFrames, encodeOuterUnit } from './frame-codec.js';
-import { decodeMetrics, decodeRegistry, decodeQuest, decodeChunks, decodeRegister, decodeOpRes, decodePresence, decodeInvSnap, encodeRegAck } from './decoders.js';
+import { decodeMetrics, decodeRegistry, decodeQuest, decodeChunks, decodeRegister, decodeOpRes, decodePresence, decodeInvSnap, decodeQuestReg, encodeRegAck } from './decoders.js';
 import { saveInvSnapshot } from './inv-store.js';
+import { saveQuestRegistry } from './quest-registry-store.js';
 import { saveMetrics } from './metrics-history.js';
 import { saveRegistry, saveQuests, saveChunks } from './persistence.js';
 import { getPolicy, ZERO_POLICY } from './policy-store.js';
@@ -20,6 +21,7 @@ const CHUNKS = 'biforesting:chunks';
 const OP_RES = 'biforesting:op_res';
 const PRESENCE = 'biforesting:presence';
 const INVSNAP = 'biforesting:invsnap';
+const QUESTREG = 'biforesting:questreg';
 
 /**
  * Where op_res/presence messages and link-up notifications go (the op dispatcher). Wired by the
@@ -195,6 +197,17 @@ class BiforestingLinkManager {
             name: snap.header.name,
             reason: snap.header.reason,
             sizeBytes: snap.gz.length,
+          });
+        }
+        break;
+      case QUESTREG:
+        if (s.identity?.resolved) {
+          const reg = decodeQuestReg(payload);
+          await saveQuestRegistry(s.identity, reg);
+          eventBus.emit('biforesting.questreg.updated', {
+            instanceKey: s.identity.instanceKey,
+            source: reg.source,
+            count: reg.quests.length,
           });
         }
         break;
