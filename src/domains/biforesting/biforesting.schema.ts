@@ -5,6 +5,13 @@ export const linkServerParamsSchema = z.object({
   server: z.string().min(1).max(64),
 });
 
+// ── Metrics history (v2, plan D13) ───────────────────────────────────────────
+
+export const metricsHistoryQuerySchema = z.object({
+  res: z.enum(['raw', 'hourly']).default('raw'),
+  sinceHours: z.coerce.number().int().min(1).max(720).optional(),
+});
+
 // ── Durable ops ──────────────────────────────────────────────────────────────
 
 export const opIdParamsSchema = z.object({
@@ -97,3 +104,4 @@ export type ChunksDownBody = z.infer<typeof chunksDownBodySchema>;
 export type OpIdParams = z.infer<typeof opIdParamsSchema>;
 export type OpCreateBody = z.infer<typeof opCreateBodySchema>;
 export type OpListQuery = z.infer<typeof opListQuerySchema>;
+export type MetricsHistoryQuery = z.infer<typeof metricsHistoryQuerySchema>;

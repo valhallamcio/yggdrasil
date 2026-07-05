@@ -11,7 +11,36 @@ import type { LinkMetrics, RegistryPayload, QuestTeam, ChunkTeam, RegisterInfo, 
 
 export function decodeMetrics(payload: Buffer): LinkMetrics {
   const r = new Reader(payload);
-  r.varInt(); // version
+  const version = r.varInt();
+  if (version >= 2) {
+    // v2: [varint 2][utf json] — global window + per-dim timing + census (plan D9/D13)
+    const o = JSON.parse(r.utf()) as {
+      msptAvg: number;
+      msptMax: number;
+      tps: number;
+      players: number;
+      heapUsed: number;
+      heapMax: number;
+      perDim: LinkMetrics['perDim'];
+      censusAgeMs: number;
+    };
+    const perDim = Array.isArray(o.perDim) ? o.perDim : [];
+    let loadedChunks = 0;
+    for (const d of perDim) loadedChunks += d.loadedChunks || 0;
+    return {
+      mspt: o.msptAvg,
+      tps: o.tps,
+      players: o.players,
+      levels: perDim.length,
+      loadedChunks,
+      heapUsed: o.heapUsed,
+      heapMax: o.heapMax,
+      v: version,
+      msptMax: o.msptMax,
+      perDim,
+      censusAgeMs: o.censusAgeMs,
+    };
+  }
   const mspt = r.float();
   const tps = r.float();
   const players = r.varInt();

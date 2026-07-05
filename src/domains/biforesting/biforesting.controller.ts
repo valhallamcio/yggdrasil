@@ -3,10 +3,11 @@ import { biforestingLinkManager } from '../../plugins/biforesting-link/link-mana
 import { encodeQuestDown, encodeChunksDown } from '../../plugins/biforesting-link/decoders.js';
 import { getPolicy, setPolicy, maskForFeatures, featureNamesForMask } from '../../plugins/biforesting-link/policy-store.js';
 import { opDispatcher, opsStore } from '../../plugins/biforesting-link/ops-runtime.js';
+import { latestStored, rawHistory, hourlyHistory } from '../../plugins/biforesting-link/metrics-history.js';
 import { serverResolver } from '../../plugins/biforesting-link/server-resolver.js';
 import { NotFoundError, ValidationError } from '../../shared/errors/index.js';
 import { catalogEntry, OPS_CATALOG } from './ops-catalog.js';
-import type { LinkServerParams, PolicyPutBody, QuestDownBody, ChunksDownBody, OpCreateBody, OpIdParams, OpListQuery } from './biforesting.schema.js';
+import type { LinkServerParams, PolicyPutBody, QuestDownBody, ChunksDownBody, OpCreateBody, OpIdParams, OpListQuery, MetricsHistoryQuery } from './biforesting.schema.js';
 
 const QUEST_CHANNEL = 'biforesting:quest';
 const CHUNKS_CHANNEL = 'biforesting:chunks';
@@ -23,6 +24,38 @@ export class BiforestingController {
     const session = biforestingLinkManager.getSessionSnapshot(server);
     if (!session) throw new NotFoundError('Link session', server);
     res.json({ data: session });
+  };
+
+  /** Metrics v2: the live session's last sample, else the newest stored raw sample. */
+  getMetricsLatest = async (req: Request, res: Response): Promise<void> => {
+    const { server } = req.params as unknown as LinkServerParams;
+    const identity = await serverResolver.resolve(server);
+    const session = biforestingLinkManager.getSessionByServer(server);
+    if (session?.metrics) {
+      res.json({
+        data: { instanceKey: identity.instanceKey, source: 'live', at: new Date().toISOString(), metrics: session.metrics },
+      });
+      return;
+    }
+    const stored = await latestStored(identity.instanceKey);
+    if (!stored) throw new NotFoundError('Metrics', identity.instanceKey);
+    res.json({
+      data: { instanceKey: identity.instanceKey, source: 'stored', at: stored.at.toISOString(), metrics: stored.metrics },
+    });
+  };
+
+  /** Metrics v2 history: raw (72 h TTL) or hourly downsample (30 d TTL). */
+  getMetricsHistory = async (req: Request, res: Response): Promise<void> => {
+    const { server } = req.params as unknown as LinkServerParams;
+    const query = req.query as unknown as MetricsHistoryQuery;
+    const identity = await serverResolver.resolve(server);
+    if (query.res === 'hourly') {
+      const points = await hourlyHistory(identity.instanceKey, query.sinceHours ?? 168);
+      res.json({ data: { instanceKey: identity.instanceKey, res: 'hourly', count: points.length, points } });
+      return;
+    }
+    const points = await rawHistory(identity.instanceKey, query.sinceHours ?? 6);
+    res.json({ data: { instanceKey: identity.instanceKey, res: 'raw', count: points.length, points } });
   };
 
   /** The stored link policy for a server (ZERO for unknown — features default off). */

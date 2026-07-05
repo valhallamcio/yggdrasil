@@ -7,6 +7,7 @@ import { parseOuterUnits, Reassembler, MAX_INBOUND_FRAME } from './frame-codec.j
 import { biforestingLinkManager } from './link-manager.js';
 import { processOuterUnit } from './session-processor.js';
 import { ensureIndexes } from './persistence.js';
+import { ensureMetricsIndexes, startDownsampleSweep } from './metrics-history.js';
 import { opDispatcher, opsStore } from './ops-runtime.js';
 
 /** Idle sockets are dropped after this long with no traffic (the mod streams metrics ~1 Hz). */
@@ -29,17 +30,22 @@ export class BiforestingLinkPlugin implements Plugin {
   readonly name = 'biforesting-link';
   private server: NetServer | null = null;
   private connSeq = 0;
+  private stopDownsample: (() => void) | null = null;
 
   // The link is a standalone TCP server, so the Express app / HTTP server args are unused.
   async init(): Promise<void> {
     getAuthKey(); // fail fast if the PSK/authKey is missing or malformed
     await ensureIndexes();
     await opsStore.ensureIndexes();
+    await ensureMetricsIndexes();
 
     // Durable ops: boot-reset stranded `dispatched` ops, start the recovery sweep, and route
     // op_res/presence/link-up through the dispatcher.
     biforestingLinkManager.setOpSink(opDispatcher);
     await opDispatcher.start();
+
+    // Metrics history (D13): hourly downsample of biforesting_metrics, swept every few minutes.
+    this.stopDownsample = startDownsampleSweep();
 
     const port = config.BIFORESTING_LINK_PORT;
     const host = config.BIFORESTING_LINK_HOST;
@@ -118,6 +124,10 @@ export class BiforestingLinkPlugin implements Plugin {
   }
 
   async shutdown(): Promise<void> {
+    if (this.stopDownsample) {
+      this.stopDownsample();
+      this.stopDownsample = null;
+    }
     opDispatcher.stop();
     biforestingLinkManager.setOpSink(null);
     biforestingLinkManager.listening = false;

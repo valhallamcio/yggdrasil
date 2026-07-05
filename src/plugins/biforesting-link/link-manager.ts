@@ -3,6 +3,7 @@ import { logger } from '../../core/logger/index.js';
 import { getAuthKey } from './auth-key.js';
 import { encodeFrames, encodeOuterUnit } from './frame-codec.js';
 import { decodeMetrics, decodeRegistry, decodeQuest, decodeChunks, decodeRegister, decodeOpRes, decodePresence, encodeRegAck } from './decoders.js';
+import { saveMetrics } from './metrics-history.js';
 import { saveRegistry, saveQuests, saveChunks } from './persistence.js';
 import { getPolicy, ZERO_POLICY } from './policy-store.js';
 import { serverResolver } from './server-resolver.js';
@@ -363,6 +364,7 @@ class BiforestingLinkManager {
       serverId: s.identity.serverId,
       ...metrics,
     });
+    void saveMetrics(s.identity, metrics); // best-effort history (plan D13)
   }
 
   private async onRegistry(s: Session, payload: Buffer): Promise<void> {

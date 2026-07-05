@@ -2,6 +2,15 @@ import type { ObjectId } from 'mongodb';
 
 // ── Decoded UP payloads (mirror bifrost-lib/test/ygg_mock.py parsers) ─────────
 
+export interface DimMetrics {
+  dim: string;
+  tickMsAvg: number;
+  tickMsMax: number;
+  entities: Array<{ type: string; n: number }>;
+  totalEntities: number;
+  loadedChunks: number;
+}
+
 export interface LinkMetrics {
   mspt: number;
   tps: number;
@@ -10,6 +19,11 @@ export interface LinkMetrics {
   loadedChunks: number;
   heapUsed: number;
   heapMax: number;
+  /** Metrics v2 extras (absent on v1 senders). `mspt` above = v2 `msptAvg`. */
+  v?: number;
+  msptMax?: number;
+  perDim?: DimMetrics[];
+  censusAgeMs?: number;
 }
 
 export interface RegistryEntry {

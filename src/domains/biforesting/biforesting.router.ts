@@ -10,6 +10,7 @@ import {
   opCreateBodySchema,
   opIdParamsSchema,
   opListQuerySchema,
+  metricsHistoryQuerySchema,
 } from './biforesting.schema.js';
 import { asyncHandler } from '../../shared/utils/async-handler.js';
 
@@ -60,6 +61,22 @@ biforestingRouter.get(
   apiKeyAuth(),
   validate({ params: linkServerParamsSchema, query: opListQuerySchema }),
   asyncHandler(controller.listOps),
+);
+
+// ── Metrics v2 (plan D13) ────────────────────────────────────────────────────
+
+biforestingRouter.get(
+  '/:server/metrics/latest',
+  apiKeyAuth(),
+  validate({ params: linkServerParamsSchema }),
+  asyncHandler(controller.getMetricsLatest),
+);
+
+biforestingRouter.get(
+  '/:server/metrics/history',
+  apiKeyAuth(),
+  validate({ params: linkServerParamsSchema, query: metricsHistoryQuerySchema }),
+  asyncHandler(controller.getMetricsHistory),
 );
 
 // ── Per-server feature policy (authoritative reg_ack source) ────────────────
