@@ -102,7 +102,7 @@ export class BiforestingController {
     const snap = await getSnapshot(id);
     if (!snap) throw new NotFoundError('Snapshot', id);
     const { gz, ...rest } = snap;
-    res.json({ data: { ...rest, gzBase64: gz.buffer ? Buffer.from(gz.buffer).toString('base64') : null } });
+    res.json({ data: { ...rest, gzBase64: binaryToBuffer(gz)?.toString('base64') ?? null } });
   };
 
   /**
@@ -165,7 +165,42 @@ export class BiforestingController {
     const { pack } = req.params as unknown as PackParams;
     const { lang } = req.body as PackLangBody;
     const count = await savePackLang(pack, lang);
-    res.json({ data: { pack, entries: count } });
+
+    // Lang resolution happens at INGEST, so an already-dumped registry keeps raw keys until a
+    // re-dump — silently. Two guards: warn when the pack tag matches no known server (typo'd
+    // uploads used to vanish into a never-read doc), and auto-enqueue registry pulls on every
+    // live-linked instance of this pack so search refreshes without a manual step.
+    const knownTag = (await serverResolver.resolve(pack)).resolved;
+    const live = biforestingLinkManager
+      .getSnapshot()
+      .sessions.filter((s) => s.identity?.tag === pack)
+      .map((s) => s.identity!);
+    const refreshedInstances: string[] = [];
+    for (const identity of live) {
+      if (refreshedInstances.includes(identity.instanceKey)) continue;
+      for (const type of ['pull_item_registry', 'pull_quest_registry'] as const) {
+        const { op } = await opsStore.create({
+          instanceKey: identity.instanceKey,
+          serverTag: identity.tag,
+          type,
+          params: {},
+          target: null,
+          createdBy: 'auto:lang-refresh',
+        });
+        void opDispatcher.onOpCreated(op);
+      }
+      refreshedInstances.push(identity.instanceKey);
+    }
+    res.json({
+      data: {
+        pack,
+        entries: count,
+        knownTag,
+        refreshedInstances,
+        reDumpRequired: refreshedInstances.length === 0,
+        ...(knownTag ? {} : { warning: `no known server has tag '${pack}' — lang is stored but will never apply until one does` }),
+      },
+    });
   };
 
   /** Upload a batch of item-icon PNGs for a pack (auditable; sha-deduped in GridFS). */
@@ -456,4 +491,19 @@ export class BiforestingController {
     const claims = teams.reduce((n, t) => n + t.claims.length, 0);
     res.json({ data: { sent: true, channel: CHUNKS_CHANNEL, teams: teams.length, claims } });
   };
+}
+
+/**
+ * Exact bytes out of a stored blob regardless of what the driver hands back. A mongo `Binary`'s
+ * `.buffer` is an exact-length Uint8Array, but a Node `Buffer`'s `.buffer` is its POOLED
+ * ArrayBuffer — `Buffer.from(gz.buffer)` on one of those serialized the whole allocation pool,
+ * not the blob.
+ */
+function binaryToBuffer(v: unknown): Buffer | null {
+  if (v == null) return null;
+  if (Buffer.isBuffer(v)) return v;
+  const inner = (v as { buffer?: unknown }).buffer;
+  if (inner instanceof Uint8Array) return Buffer.from(inner);
+  if (inner instanceof ArrayBuffer) return Buffer.from(new Uint8Array(inner));
+  return null;
 }

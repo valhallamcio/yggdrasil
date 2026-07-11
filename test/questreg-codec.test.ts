@@ -67,3 +67,10 @@ test('questreg codec: unsupported version and truncated gz are rejected', () => 
   const truncated = new Writer().varInt(1).varInt(10).build();
   assert.throws(() => decodeQuestReg(truncated), /exceeds payload/);
 });
+
+test('questreg codec: a zip-bomb payload is rejected by the inflate bound', () => {
+  // ~40MB of zeros gzips to ~40KB — under the frame cap, over the 32MB inflate bound.
+  const bomb = gzipSync(Buffer.alloc(40 * 1024 * 1024));
+  const payload = Buffer.concat([new Writer().varInt(1).varInt(bomb.length).build(), bomb]);
+  assert.throws(() => decodeQuestReg(payload));
+});

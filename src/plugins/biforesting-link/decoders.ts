@@ -88,7 +88,10 @@ export function decodeItemRegistry(payload: Buffer): ItemRegPayload {
   if (version !== 2) throw new Error(`unsupported registry version ${version}`);
   const gzLen = r.varInt();
   const gz = r.bytes(gzLen);
-  const raw = JSON.parse(gunzipSync(gz).toString('utf8')) as Record<string, unknown>;
+  // maxOutputLength: the 16MB frame cap bounds only the COMPRESSED size — JSON gzips ~1000x, so
+  // an unbounded inflate is a zip-bomb vector. 64MB ≈ 150× the largest observed dump (41829
+  // items = ~405KB gz / ~4MB raw); over-limit throws and the dispatch catch rejects the message.
+  const raw = JSON.parse(gunzipSync(gz, { maxOutputLength: 64 * 1024 * 1024 }).toString('utf8')) as Record<string, unknown>;
   const rows = Array.isArray(raw['items']) ? (raw['items'] as Array<Record<string, unknown>>) : [];
   const items: ItemRegRow[] = rows
     .filter((it) => typeof it['id'] === 'string' && it['id'].length > 0)
@@ -281,7 +284,8 @@ export function decodeQuestReg(payload: Buffer): QuestRegPayload {
   if (version !== 1) throw new Error(`unsupported questreg version ${version}`);
   const gzLen = r.varInt();
   const gz = r.bytes(gzLen);
-  const raw = JSON.parse(gunzipSync(gz).toString('utf8')) as Record<string, unknown>;
+  // Bounded inflate — see decodeItemRegistry. 32MB ≈ 300× the largest observed quest dump.
+  const raw = JSON.parse(gunzipSync(gz, { maxOutputLength: 32 * 1024 * 1024 }).toString('utf8')) as Record<string, unknown>;
   const rows = Array.isArray(raw['quests']) ? (raw['quests'] as Array<Record<string, unknown>>) : [];
   const quests: QuestRegRow[] = rows
     .filter((q) => typeof q['id'] === 'string' && q['id'].length > 0)

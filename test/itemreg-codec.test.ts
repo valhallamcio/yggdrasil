@@ -92,3 +92,10 @@ test('itemreg codec: an unsupported version throws', () => {
   const w = new Writer().varInt(99);
   assert.throws(() => decodeItemRegistry(w.build()), /unsupported registry version 99/);
 });
+
+test('itemreg codec: a zip-bomb payload is rejected by the inflate bound', () => {
+  // ~70MB of zeros gzips to ~70KB — well under the frame cap, far over the 64MB inflate bound.
+  const bomb = gzipSync(Buffer.alloc(70 * 1024 * 1024));
+  const payload = Buffer.concat([new Writer().varInt(2).varInt(bomb.length).build(), bomb]);
+  assert.throws(() => decodeItemRegistry(payload));
+});

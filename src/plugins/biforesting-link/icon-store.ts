@@ -65,6 +65,35 @@ function putBlob(sha: string, png: Buffer): Promise<void> {
 }
 
 /**
+ * GridFS uploads don't unique-key on filename, so two concurrent uploads of the same sha both
+ * pass the existence check and both land — keep the oldest file, drop the rest. Idempotent.
+ */
+async function dedupeBlobs(sha: string): Promise<void> {
+  const files = await bucket().find({ filename: sha }).sort({ uploadDate: 1 }).toArray();
+  for (const extra of files.slice(1)) {
+    try {
+      await bucket().delete(extra._id);
+    } catch (err) {
+      logger.debug({ err, sha }, 'biforesting-icons: duplicate blob delete raced');
+    }
+  }
+}
+
+/** Delete a sha's blob(s) once NO mapping references it anymore (re-mapped icons orphan theirs). */
+async function reapOrphanBlob(sha: string): Promise<void> {
+  const stillReferenced = await mapCol().countDocuments({ sha }, { limit: 1 });
+  if (stillReferenced > 0) return;
+  const files = await bucket().find({ filename: sha }).toArray();
+  for (const file of files) {
+    try {
+      await bucket().delete(file._id);
+    } catch (err) {
+      logger.debug({ err, sha }, 'biforesting-icons: orphan blob delete raced');
+    }
+  }
+}
+
+/**
  * Upload a batch of icons for a pack. Each PNG is stored once by sha (deduped across the whole
  * bucket); the mapping `pack+id → sha` is upserted. Returns per-batch counters.
  */
@@ -81,18 +110,24 @@ export async function saveIcons(pack: string, icons: IconUpload[]): Promise<{ st
       try {
         await putBlob(sha, icon.png);
         stored++;
+        // Two concurrent uploads of the same sha both pass shaExists — collapse to one blob.
+        await dedupeBlobs(sha);
       } catch (err) {
-        // A concurrent upload of the same sha races the existence check — treat as deduped.
         logger.debug({ err, sha }, 'biforesting-icons: blob write raced (treating as deduped)');
         deduped++;
       }
     }
-    await mapCol().updateOne(
+    const prev = await mapCol().findOneAndUpdate(
       { pack, id: icon.id },
       { $set: { pack, id: icon.id, sha, bytes: icon.png.length, uploadedAt: new Date() } },
       { upsert: true },
     );
     mapped++;
+    // A re-upload that changed this icon's pixels leaves the old blob behind — reap it if this
+    // was its last reference.
+    if (prev && prev.sha !== sha) {
+      await reapOrphanBlob(prev.sha);
+    }
   }
   return { stored, deduped, mapped };
 }

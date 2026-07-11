@@ -113,3 +113,22 @@ test('questreg-store: instances are isolated', async () => {
   assert.equal(infoX.count, 1);
   assert.equal(infoX.source, 'ftbq');
 });
+
+test('questreg-store: a dump that fails mid-insert keeps the previous generation readable', async () => {
+  await saveQuestRegistry(identity('pack-gen'), payload('ftbq', [
+    quest('AAA', 'Good Quest One'),
+    quest('BBB', 'Good Quest Two'),
+  ]));
+  assert.equal((await questRegistryInfo('pack-gen')).count, 2);
+
+  // >16MB title blows the BSON doc limit — a NON-duplicate insert error must discard the new
+  // generation and keep the old one active.
+  await saveQuestRegistry(identity('pack-gen'), payload('ftbq', [
+    quest('CCC', 'x'.repeat(17 * 1024 * 1024)),
+    quest('DDD', 'Innocent Bystander'),
+  ]));
+
+  assert.equal((await questRegistryInfo('pack-gen')).count, 2, 'old generation still active');
+  assert.equal((await searchQuests('pack-gen', 'Good Quest One'))[0]?.questId, 'AAA');
+  assert.equal((await searchQuests('pack-gen', 'Innocent Bystander')).length, 0, 'partial generation invisible');
+});

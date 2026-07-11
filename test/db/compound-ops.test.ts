@@ -50,11 +50,32 @@ async function mkParent(instanceKey: string, params: Record<string, unknown> = {
   return op;
 }
 
-/** The mod side of one child: ack + result, driving the chain like a real backend. */
-async function completeChild(stack: ReturnType<typeof mkStack>, instanceKey: string, opId: string) {
+/** Poll until `cond` holds — fixed settle sleeps flaked under CPU load (parallel gradle builds). */
+async function waitFor(cond: () => Promise<boolean> | boolean, what: string, timeoutMs = 5000): Promise<void> {
+  const start = Date.now();
+  for (;;) {
+    if (await cond()) return;
+    if (Date.now() - start > timeoutMs) throw new Error(`waitFor timed out: ${what}`);
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
+const PARENT_TERMINAL = new Set(['completed', 'failed', 'cancelled', 'expired']);
+
+/**
+ * The mod side of one child: ack + result, driving the chain like a real backend. The compound
+ * update hook is fire-and-forget, so wait for its observable effect — the next child hitting the
+ * wire, or the parent going terminal after the last one.
+ */
+async function completeChild(stack: ReturnType<typeof mkStack>, instanceKey: string, opId: string, parentId: string) {
+  const sentBefore = stack.port.sent.length;
   await stack.dispatcher.onOpRes(instanceKey, { opId, phase: 'ack' });
   await stack.dispatcher.onOpRes(instanceKey, { opId, phase: 'result', status: 'completed', result: { ok: 1 } });
-  await new Promise((r) => setTimeout(r, 25)); // update hook is fire-and-forget
+  await waitFor(async () => {
+    if (stack.port.sent.length > sentBefore) return true;
+    const p = await store.get(parentId);
+    return PARENT_TERMINAL.has(p?.state ?? '');
+  }, `chain reaction after child ${opId}`);
 }
 
 before(async () => {
@@ -85,7 +106,7 @@ test('compound: children run strictly one at a time, parent completes after the 
     assert.equal(stack.port.sent.length, i + 1, `exactly one new dispatch per completed child (step ${i})`);
     const wire = stack.port.sent[i]!;
     assert.equal(wire.body['type'], specs[i]!.type, `child ${i} type`);
-    await completeChild(stack, 'pack-a', wire.body['opId'] as string);
+    await completeChild(stack, 'pack-a', wire.body['opId'] as string, parent._id);
   }
 
   const done = await store.get(parent._id);
@@ -103,11 +124,11 @@ test('compound: child failure fails the parent at the checkpoint; resume respawn
   await stack.compound.expand(parent);
 
   // child 0 completes, child 1 (quest_reset) fails
-  await completeChild(stack, 'pack-f', stack.port.sent[0]!.body['opId'] as string);
+  await completeChild(stack, 'pack-f', stack.port.sent[0]!.body['opId'] as string, parent._id);
   const child1Id = stack.port.sent[1]!.body['opId'] as string;
   await stack.dispatcher.onOpRes('pack-f', { opId: child1Id, phase: 'ack' });
   await stack.dispatcher.onOpRes('pack-f', { opId: child1Id, phase: 'result', status: 'failed', error: 'FTBQ absent' });
-  await new Promise((r) => setTimeout(r, 25));
+  await waitFor(async () => (await store.get(parent._id))?.state === 'failed', 'parent checkpoints');
 
   let p = await store.get(parent._id);
   assert.equal(p?.state, 'failed');
@@ -123,7 +144,7 @@ test('compound: child failure fails the parent at the checkpoint; resume respawn
 
   // drive the rest to completion
   for (let i = 2; i < stack.port.sent.length && stack.port.sent.length <= 6; i++) {
-    await completeChild(stack, 'pack-f', stack.port.sent[i]!.body['opId'] as string);
+    await completeChild(stack, 'pack-f', stack.port.sent[i]!.body['opId'] as string, parent._id);
   }
   assert.equal((await store.get(parent._id))?.state, 'completed');
 });
@@ -136,7 +157,8 @@ test('compound: waiting_player child stalls the chain without failing the parent
   const child0Id = stack.port.sent[0]!.body['opId'] as string;
   await stack.dispatcher.onOpRes('pack-w', { opId: child0Id, phase: 'ack' });
   await stack.dispatcher.onOpRes('pack-w', { opId: child0Id, phase: 'result', status: 'waiting_player' });
-  await new Promise((r) => setTimeout(r, 25));
+  // Negative assertion (nothing should advance) — a settle sleep is the only option here.
+  await new Promise((r) => setTimeout(r, 50));
 
   assert.equal((await store.get(parent._id))?.state, 'pending', 'parent keeps waiting');
   assert.equal(stack.port.sent.length, 1, 'no premature next child');

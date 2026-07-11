@@ -58,3 +58,22 @@ test('icon-store: unmapped id returns null; packs are isolated', async () => {
   assert.equal(await getIcon('pack-c', 'minecraft:unknown'), null);
   assert.equal(await getIcon('other-pack', 'minecraft:stone'), null, 'pack-scoped');
 });
+
+test('icon-store: re-mapping an id reaps the orphaned blob once unreferenced', async () => {
+  const db = mongo.client.db(DB);
+  const first = png(0x66);
+  await saveIcons('pack-orphan', [{ id: 'mod:widget', png: first }]);
+  const blobsBefore = await db.collection('biforesting_icons.files').countDocuments({});
+
+  // replace the icon's pixels — the old blob has no other referent and must be reaped
+  await saveIcons('pack-orphan', [{ id: 'mod:widget', png: png(0x77) }]);
+  const blobsAfter = await db.collection('biforesting_icons.files').countDocuments({});
+  assert.equal(blobsAfter, blobsBefore, 'orphaned blob deleted, replacement stored');
+
+  // but a blob still referenced by ANOTHER mapping survives a re-map
+  const shared = png(0x88);
+  await saveIcons('pack-orphan', [{ id: 'mod:a', png: shared }, { id: 'mod:b', png: shared }]);
+  await saveIcons('pack-orphan', [{ id: 'mod:a', png: png(0x99) }]);
+  const got = await getIcon('pack-orphan', 'mod:b');
+  assert.deepEqual([...got!], [...shared], 'shared blob survives one referent re-mapping');
+});

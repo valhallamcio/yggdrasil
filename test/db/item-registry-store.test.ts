@@ -121,6 +121,63 @@ test('itemreg-store: uploaded pack lang resolves lang-key displays at ingest (R2
   assert.equal(stone[0]?.display, 'Stone', 'non-key display untouched');
 });
 
+test('itemreg-store: a dump that fails mid-insert keeps the previous generation readable', async () => {
+  await saveItemRegistry(identity('pack-gen'), payload('modern', [
+    item('good:one', 'Good One'),
+    item('good:two', 'Good Two'),
+  ]));
+  assert.equal((await itemRegistryInfo('pack-gen')).count, 2);
+
+  // A single >16MB display blows the BSON document limit — insertMany throws a NON-duplicate
+  // error, so the new generation must be discarded and the old one stay active.
+  const tooBig = 'x'.repeat(17 * 1024 * 1024);
+  await saveItemRegistry(identity('pack-gen'), payload('modern', [
+    item('bad:huge', tooBig),
+    item('bad:other', 'Innocent Bystander'),
+  ]));
+
+  const info = await itemRegistryInfo('pack-gen');
+  assert.equal(info.count, 2, 'old generation still active');
+  assert.equal((await searchItems('pack-gen', 'Good One'))[0]?.id, 'good:one', 'old rows still searchable');
+  assert.equal((await searchItems('pack-gen', 'Innocent Bystander')).length, 0, 'partial new generation not visible');
+});
+
+test('itemreg-store: concurrent dumps converge on exactly one generation', async () => {
+  await Promise.all([
+    saveItemRegistry(identity('pack-race'), payload('modern', [item('first:a', 'First A')])),
+    saveItemRegistry(identity('pack-race'), payload('modern', [item('second:b', 'Second B'), item('second:c', 'Second C')])),
+  ]);
+  // The per-key lock serializes them in call order — the second dump is the survivor, and the
+  // sweep removed every row of the first (no mixed-generation reads, no leftovers).
+  const info = await itemRegistryInfo('pack-race');
+  assert.equal(info.count, 2);
+  const all = await searchItems('pack-race', undefined);
+  assert.deepEqual(all.map((d) => d.id).sort(), ['second:b', 'second:c']);
+  const raw = await mongo.client.db(DB).collection('biforesting_item_registry').countDocuments({ instanceKey: 'pack-race' });
+  assert.equal(raw, 2, 'superseded generation swept from the collection');
+});
+
+test('itemreg-store: legacy pre-generation rows (no dumpId) are swept by the first new dump', async () => {
+  await mongo.client.db(DB).collection('biforesting_item_registry').insertMany([
+    { instanceKey: 'pack-legacy', tag: 'pack-legacy', serverId: null, source: 'modern', id: 'old:row', num: 0, mod: 'old', display: 'Old Row', maxStack: 64, variants: [], variantText: '', dumpedAt: new Date() },
+  ]);
+  await saveItemRegistry(identity('pack-legacy'), payload('modern', [item('new:row', 'New Row')]));
+  const raw = await mongo.client.db(DB).collection('biforesting_item_registry').countDocuments({ instanceKey: 'pack-legacy' });
+  assert.equal(raw, 1, 'dumpId-less legacy row swept');
+  assert.equal((await searchItems('pack-legacy', 'New Row'))[0]?.id, 'new:row');
+});
+
+test('itemreg-store: a dump with duplicate ids still flips (first occurrence kept)', async () => {
+  await saveItemRegistry(identity('pack-dup'), payload('modern', [
+    item('dup:same', 'First Copy'),
+    item('dup:same', 'Second Copy'),
+    item('dup:other', 'Other'),
+  ]));
+  const info = await itemRegistryInfo('pack-dup');
+  assert.equal(info.count, 2, 'duplicate collapsed, generation flipped');
+  assert.equal((await searchItems('pack-dup', 'dup:same')).length, 1);
+});
+
 test('itemreg-store: 100k-row ingest + search stays fast', async () => {
   const N = 100_000;
   const items: ItemRegRow[] = new Array(N);
