@@ -7,11 +7,11 @@
  * `metrics` + a one-time `registry` (+ optional `quest`/`chunks`), and prints any DOWN frames it
  * receives. Mirrors `YggdrasilLink.java` framing and `PlayFrameCodec.java` signing.
  *
- *   BIFORESTING_PSK=<psk> node scripts/fake-mod.mjs [host] [port] [serverId]          # raw TCP (deprecated listener)
- *   BIFORESTING_PSK=<psk> node scripts/fake-mod.mjs --ws [host] [port] [serverId]     # WS /biforesting/ on the main HTTP port
- *   BIFORESTING_AUTHKEY_HEX=<64hex> node scripts/fake-mod.mjs 127.0.0.1 8765 my-server
+ *   BIFORESTING_PSK=<psk> node scripts/fake-mod.mjs [host] [port] [serverId]     # WS /biforesting/ on the main HTTP port
+ *   BIFORESTING_AUTHKEY_HEX=<64hex> node scripts/fake-mod.mjs 127.0.0.1 3000 my-server
  *
- * WS mode mirrors the mod's WebSocketClient: one outer unit per binary message, default port 3000.
+ * WS-only since phase 9 (the raw-TCP listener is gone; --ws is still accepted as a no-op).
+ * Mirrors the mod's WebSocketClient: one outer unit per binary message, default port 3000.
  * Flags via env: SEND_QUEST=1 SEND_CHUNKS=1 BAD_KEY=1 (sign with a wrong key → all frames rejected).
  *
  * Durable-ops emulation via `--op-mode <mode>` (how DOWN `biforesting:op` is answered):
@@ -22,18 +22,18 @@
  *   waiting   result status=waiting_player, then a presence join 2 s later; a re-dispatched
  *             op completes → exercises the waiting_player → presence → requeue path
  */
-import net from 'node:net';
 import { createHmac, pbkdf2Sync, randomBytes } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 import WebSocket from 'ws';
 
 const args = process.argv.slice(2);
-const useWs = args.includes('--ws');
+// --ws kept as an accepted no-op so existing invocations keep working (WS is the only transport)
 const opModeIdx = args.indexOf('--op-mode');
 const opMode = opModeIdx >= 0 ? args[opModeIdx + 1] : 'ack-ok';
-const positional = args.filter((a, i) => a !== '--ws' && i !== opModeIdx && i !== opModeIdx + 1);
+// NB: guard opModeIdx<0 — 'i !== opModeIdx + 1' would otherwise drop positional[0] when --op-mode is absent
+const positional = args.filter((a, i) => a !== '--ws' && (opModeIdx < 0 || (i !== opModeIdx && i !== opModeIdx + 1)));
 const host = positional[0] ?? '127.0.0.1';
-const port = Number(positional[1] ?? (useWs ? 3000 : 8765));
+const port = Number(positional[1] ?? 3000);
 const serverId = positional[2] ?? 'test';
 
 function authKey() {
@@ -206,7 +206,7 @@ function onOp(chunk) {
 }
 
 function onOpen(sock) {
-  console.log(`[fake-mod] connected (${useWs ? 'ws' : 'tcp'}) to ${host}:${port} as serverId="${serverId}"${process.env.BAD_KEY ? ' (BAD_KEY — expect rejection)' : ''}`);
+  console.log(`[fake-mod] connected (ws) to ${host}:${port} as serverId="${serverId}"${process.env.BAD_KEY ? ' (BAD_KEY — expect rejection)' : ''}`);
   sendUnit(sock, 'biforesting:hello', Buffer.from(serverId, 'utf8'));
   sendUnit(sock, 'biforesting:register', register());
   sendUnit(sock, 'biforesting:registry', registry());
@@ -248,18 +248,10 @@ function onOpen(sock) {
   setInterval(() => sendUnit(sock, 'biforesting:metrics', metrics()), 1000);
 }
 
-if (useWs) {
-  const ws = new WebSocket(`ws://${host}:${port}/biforesting/`);
-  transport.send = (unit) => ws.send(unit, { binary: true });
-  ws.on('open', () => onOpen(ws));
-  // Each WS message is one complete outer unit; the incremental parser handles it fine.
-  ws.on('message', (raw) => onData(Buffer.isBuffer(raw) ? raw : Buffer.from(raw)));
-  ws.on('error', (e) => console.error('[fake-mod] error:', e.message));
-  ws.on('close', () => { console.log('[fake-mod] closed'); process.exit(0); });
-} else {
-  const sock = net.createConnection({ host, port }, () => onOpen(sock));
-  transport.send = (unit) => sock.write(unit);
-  sock.on('data', onData);
-  sock.on('error', (e) => console.error('[fake-mod] error:', e.message));
-  sock.on('close', () => { console.log('[fake-mod] closed'); process.exit(0); });
-}
+const ws = new WebSocket(`ws://${host}:${port}/biforesting/`);
+transport.send = (unit) => ws.send(unit, { binary: true });
+ws.on('open', () => onOpen(ws));
+// Each WS message is one complete outer unit; the incremental parser handles it fine.
+ws.on('message', (raw) => onData(Buffer.isBuffer(raw) ? raw : Buffer.from(raw)));
+ws.on('error', (e) => console.error('[fake-mod] error:', e.message));
+ws.on('close', () => { console.log('[fake-mod] closed'); process.exit(0); });

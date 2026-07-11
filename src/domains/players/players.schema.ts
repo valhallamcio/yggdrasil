@@ -37,24 +37,6 @@ export const skinQuerySchema = z.object({
   size: z.coerce.number().int().min(8).max(512).default(128),
 });
 
-export const editPositionBodySchema = z.object({
-  x: z.number(),
-  y: z.number(),
-  z: z.number(),
-  yaw: z.number().optional(),
-  pitch: z.number().optional(),
-  dimension: z.string().optional(),
-  gameMode: z.number().int().min(0).max(3).optional(),
-});
-
-export const editInventoryBodySchema = z.object({
-  inventory: z.array(z.record(z.unknown())),
-});
-
-export const editStatsBodySchema = z.object({
-  stats: z.record(z.record(z.number())),
-});
-
 export type PlayerParams = z.infer<typeof playerParamsSchema>;
 export type PlayerServerParams = z.infer<typeof playerServerParamsSchema>;
 export type HistoryQuery = z.infer<typeof historyQuerySchema>;
@@ -62,7 +44,4 @@ export type HistoryGranularity = z.infer<typeof historyGranularitySchema>;
 export type SearchQuery = z.infer<typeof searchQuerySchema>;
 export type LeaderboardQuery = z.infer<typeof leaderboardQuerySchema>;
 export type SkinQuery = z.infer<typeof skinQuerySchema>;
-export type EditPositionBody = z.infer<typeof editPositionBodySchema>;
-export type EditInventoryBody = z.infer<typeof editInventoryBodySchema>;
-export type EditStatsBody = z.infer<typeof editStatsBodySchema>;
 export type AnalyticsQuery = z.infer<typeof analyticsQuerySchema>;

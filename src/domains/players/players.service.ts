@@ -5,7 +5,6 @@ import { ServersRepository } from '../servers/servers.repository.js';
 import { bifrostStateManager } from '../../plugins/bifrost/state-manager.js';
 import { binaryToUuid, uuidToBinary } from '../../shared/utils/uuid.js';
 import { AppError, NotFoundError } from '../../shared/errors/index.js';
-import { logger } from '../../core/logger/index.js';
 import { playerStatsRecorder } from './player-stats-recorder.js';
 import { peakTracker } from './peak-tracker.js';
 import type {
@@ -221,19 +220,10 @@ export class PlayersService {
     }
   }
 
-  async updatePlayerStats(nick: string, tag: string, stats: Record<string, Record<string, number>>): Promise<void> {
-    const { uuid, serverId } = await this.resolvePlayerAndServer(nick, tag);
-    let content: string;
-    try {
-      content = await this.pterodactyl.readFile(serverId, `/world/stats/${uuid}.json`);
-    } catch (err) {
-      if (err instanceof AppError) throw err;
-      this.throwPlayerDataNotFound(nick, tag);
-    }
-    const existing = JSON.parse(content) as { stats: Record<string, Record<string, number>>; DataVersion: number };
-    existing.stats = { ...existing.stats, ...stats };
-    await this.pterodactyl.writeFile(serverId, `/world/stats/${uuid}.json`, JSON.stringify(existing, null, 2));
-  }
+  // NOTE (phase 9): the PUT write paths (stats JSON merge, Inventory/Pos NBT rewrites via
+  // mc-nbt-lib + Pterodactyl file writes) are GONE — Node never writes .dat again (the scrapped
+  // admin-panel corruption lesson). Mutations go through the biforesting ops API, which edits
+  // NBT in-JVM on the backend. The GET readers below stay until re-homed onto snapshots/ops.
 
   // ── Player Inventory (NBT .dat file) ──────────────────────────────
 
@@ -246,33 +236,6 @@ export class PlayersService {
     // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
     const enderItems = mc.getValue(nbtData, 'EnderItems');
     return { inventory: inventory?.value ?? null, enderItems: enderItems?.value ?? null };
-  }
-
-  async updatePlayerInventory(nick: string, tag: string, inventory: unknown[]): Promise<void> {
-    const { uuid, serverId } = await this.resolvePlayerAndServer(nick, tag);
-    const filePath = `/world/playerdata/${uuid}.dat`;
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-explicit-any
-    let nbtData: any;
-    try {
-      const buffer = await this.pterodactyl.readBinaryFile(serverId, filePath);
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-      const mc = await getNbt();
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-      nbtData = mc.parseCompressedNBT(buffer);
-    } catch (err) {
-      if (err instanceof AppError) throw err;
-      this.throwPlayerDataNotFound(nick, tag);
-    }
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-    const mc = await getNbt();
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-    mc.setValue(nbtData, 'Inventory', {
-      type: 'list',
-      value: { type: 'compound', value: inventory },
-    });
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-    const compressed: Buffer = mc.stringifyCompressedNBT(nbtData);
-    await this.pterodactyl.writeBinaryFile(serverId, filePath, compressed);
   }
 
   // ── Player Position (NBT .dat file) ───────────────────────────────
@@ -303,60 +266,6 @@ export class PlayersService {
       dimension: dimension?.value ?? 'minecraft:overworld',
       gameMode: Number(gameMode?.value ?? 0),
     };
-  }
-
-  async updatePlayerPosition(
-    nick: string,
-    tag: string,
-    position: { x: number; y: number; z: number; yaw?: number; pitch?: number; dimension?: string; gameMode?: number },
-  ): Promise<void> {
-    const { uuid, serverId } = await this.resolvePlayerAndServer(nick, tag);
-    const filePath = `/world/playerdata/${uuid}.dat`;
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-explicit-any
-    let nbtData: any;
-    try {
-      const buffer = await this.pterodactyl.readBinaryFile(serverId, filePath);
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-      const mc = await getNbt();
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-      nbtData = mc.parseCompressedNBT(buffer);
-    } catch (err) {
-      if (err instanceof AppError) throw err;
-      this.throwPlayerDataNotFound(nick, tag);
-    }
-
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-    const mc = await getNbt();
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-    mc.setValue(nbtData, 'Pos', {
-      type: 'list',
-      value: { type: 'double', value: [position.x, position.y, position.z] },
-    });
-
-    if (position.yaw !== undefined || position.pitch !== undefined) {
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-      const currentRot = mc.getValue(nbtData, 'Rotation');
-      const currentValues = currentRot?.value?.value ?? [0, 0];
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-      mc.setValue(nbtData, 'Rotation', {
-        type: 'list',
-        value: { type: 'float', value: [position.yaw ?? Number(currentValues[0]), position.pitch ?? Number(currentValues[1])] },
-      });
-    }
-
-    if (position.dimension !== undefined) {
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-      mc.setValue(nbtData, 'Dimension', { type: 'string', value: position.dimension });
-    }
-
-    if (position.gameMode !== undefined) {
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-      mc.setValue(nbtData, 'playerGameType', { type: 'int', value: position.gameMode });
-    }
-
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-    const compressed: Buffer = mc.stringifyCompressedNBT(nbtData);
-    await this.pterodactyl.writeBinaryFile(serverId, filePath, compressed);
   }
 
   // ── Advancements (JSON file) ──────────────────────────────────────

@@ -5,6 +5,7 @@ import { PlayersController } from './players.controller.js';
 import { validate } from '../../middleware/validate.js';
 import { asyncHandler } from '../../shared/utils/async-handler.js';
 import { apiKeyAuth, optionalApiKeyAuth } from '../../middleware/auth/api-key.js';
+import { goneUseOpsApi } from '../../shared/utils/gone.js';
 import {
   playerParamsSchema,
   playerServerParamsSchema,
@@ -13,9 +14,6 @@ import {
   searchQuerySchema,
   leaderboardQuerySchema,
   skinQuerySchema,
-  editPositionBodySchema,
-  editInventoryBodySchema,
-  editStatsBodySchema,
 } from './players.schema.js';
 
 // Composition root
@@ -88,12 +86,10 @@ playersRouter.get(
   asyncHandler(controller.getStats),
 );
 
-playersRouter.put(
-  '/:nick/:tag/stats',
-  apiKeyAuth(),
-  validate({ params: playerServerParamsSchema, body: editStatsBodySchema }),
-  asyncHandler(controller.updateStats),
-);
+// Phase 9: the raw player-data WRITE endpoints are gone for good — Node editing .dat/stats
+// files over the Pterodactyl file API caused the gzip/corruption incidents that killed the old
+// admin panel. Mutations go through the biforesting ops API (in-JVM NBT on the backend).
+playersRouter.put('/:nick/:tag/stats', goneUseOpsApi('run_command'));
 
 playersRouter.get(
   '/:nick/:tag/inventory',
@@ -102,12 +98,7 @@ playersRouter.get(
   asyncHandler(controller.getInventory),
 );
 
-playersRouter.put(
-  '/:nick/:tag/inventory',
-  apiKeyAuth(),
-  validate({ params: playerServerParamsSchema, body: editInventoryBodySchema }),
-  asyncHandler(controller.updateInventory),
-);
+playersRouter.put('/:nick/:tag/inventory', goneUseOpsApi('remove_item / give_item / inventory_clear'));
 
 playersRouter.get(
   '/:nick/:tag/position',
@@ -116,12 +107,7 @@ playersRouter.get(
   asyncHandler(controller.getPosition),
 );
 
-playersRouter.put(
-  '/:nick/:tag/position',
-  apiKeyAuth(),
-  validate({ params: playerServerParamsSchema, body: editPositionBodySchema }),
-  asyncHandler(controller.updatePosition),
-);
+playersRouter.put('/:nick/:tag/position', goneUseOpsApi('teleport'));
 
 playersRouter.get(
   '/:nick/:tag/advancements',

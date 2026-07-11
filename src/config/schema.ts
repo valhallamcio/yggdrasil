@@ -34,8 +34,6 @@ export const configSchema = z.object({
   PLUGIN_WEBSOCKET: booleanFromString.default('false'),
   PLUGIN_BIFORESTING_LINK: booleanFromString.default('false'),
 
-  BIFORESTING_LINK_PORT: numberFromString('8765'),
-  BIFORESTING_LINK_HOST: z.string().default('0.0.0.0'),
   BIFORESTING_PSK: z.string().optional(),
   BIFORESTING_AUTHKEY_HEX: z.string().optional(),
 

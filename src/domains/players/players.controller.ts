@@ -8,9 +8,6 @@ import type {
   SearchQuery,
   LeaderboardQuery,
   SkinQuery,
-  EditPositionBody,
-  EditInventoryBody,
-  EditStatsBody,
 } from './players.schema.js';
 
 export class PlayersController {
@@ -63,37 +60,16 @@ export class PlayersController {
     res.json({ data });
   };
 
-  updateStats = async (req: Request, res: Response): Promise<void> => {
-    const { nick, tag } = req.params as unknown as PlayerServerParams;
-    const { stats } = req.body as EditStatsBody;
-    await this.service.updatePlayerStats(nick, tag, stats);
-    res.status(204).send();
-  };
-
   getInventory = async (req: Request, res: Response): Promise<void> => {
     const { nick, tag } = req.params as unknown as PlayerServerParams;
     const data = await this.service.getPlayerInventory(nick, tag);
     res.json({ data });
   };
 
-  updateInventory = async (req: Request, res: Response): Promise<void> => {
-    const { nick, tag } = req.params as unknown as PlayerServerParams;
-    const { inventory } = req.body as EditInventoryBody;
-    await this.service.updatePlayerInventory(nick, tag, inventory);
-    res.status(204).send();
-  };
-
   getPosition = async (req: Request, res: Response): Promise<void> => {
     const { nick, tag } = req.params as unknown as PlayerServerParams;
     const data = await this.service.getPlayerPosition(nick, tag);
     res.json({ data });
-  };
-
-  updatePosition = async (req: Request, res: Response): Promise<void> => {
-    const { nick, tag } = req.params as unknown as PlayerServerParams;
-    const body = req.body as EditPositionBody;
-    await this.service.updatePlayerPosition(nick, tag, body);
-    res.status(204).send();
   };
 
   getAdvancements = async (req: Request, res: Response): Promise<void> => {
