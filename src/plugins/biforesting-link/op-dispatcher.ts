@@ -151,6 +151,7 @@ export class OpDispatcher {
       updated = await this.store.markFailed(msg.opId, msg.error ?? 'backend reported failure', {
         ok: false,
         error: msg.error ?? 'backend reported failure',
+        ...(msg.code !== undefined ? { code: msg.code } : {}),
         ...(msg.durationMs !== undefined ? { durationMs: msg.durationMs } : {}),
       });
     } else if (msg.status === 'waiting_player') {

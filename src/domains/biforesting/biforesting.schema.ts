@@ -88,6 +88,8 @@ export const opCreateBodySchema = z.object({
     .object({
       offlineMode: z.enum(['queue', 'offline-edit', 'reject']).optional(),
       dryRun: z.boolean().optional(),
+      /** Required true by requiresConfirm (dangerous) catalog entries — the REST half of the Discord confirm. */
+      confirm: z.boolean().optional(),
     })
     .optional(),
   idempotencyKey: z.string().min(8).max(128).optional(),

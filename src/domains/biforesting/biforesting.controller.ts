@@ -341,9 +341,17 @@ export class BiforestingController {
       throw new ValidationError(`Unknown server '${server}' — ops must target a resolvable server`);
     }
 
+    // Dangerous-op guard: creating a requiresConfirm type demands an explicit flags.confirm —
+    // the server-side half of the Discord confirmation flow. A raw REST caller with an API key
+    // can no longer fire quest_reset/team_reset/inventory_clear/account_reset by accident.
+    if (entry.requiresConfirm && body.flags?.confirm !== true) {
+      throw new ValidationError(
+        `'${body.type}' is a ${entry.risk} op — pass flags.confirm: true to create it (after your own confirmation step)`,
+      );
+    }
+
     // Destructive-apply guard (phase 5): a non-dry-run of a requiresDryRunConfirm type must
-    // reference a FRESH completed dry-run of the same type+target on the same instance, and a
-    // fresh pre-apply snapshot op is auto-prepended (best-effort restore point, plan D12).
+    // reference a FRESH completed dry-run of the same type+target on the same instance.
     if (entry.requiresDryRunConfirm && !body.flags?.dryRun) {
       if (!body.confirmedFromDryRun) {
         throw new ValidationError(`'${body.type}' apply requires confirmedFromDryRun (id of a completed dry-run)`);
@@ -357,6 +365,12 @@ export class BiforestingController {
       if (reason) {
         throw new ValidationError(`confirmedFromDryRun rejected: ${reason}`);
       }
+    }
+
+    // Auto-prepended pre-apply snapshot (best-effort restore point, plan D12) — for dry-run-
+    // confirmed applies AND autoSnapshot types (standalone inventory_clear). Compound children
+    // never pass through here (account_reset's chain snapshots as child 0), so no double-snapshot.
+    if ((entry.requiresDryRunConfirm || entry.autoSnapshot) && !body.flags?.dryRun && body.target) {
       const { op: snap } = await opsStore.create({
         instanceKey: identity.instanceKey,
         serverTag: identity.tag,

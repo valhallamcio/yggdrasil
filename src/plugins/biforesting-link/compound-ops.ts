@@ -18,6 +18,23 @@ import type { OpDoc } from './types.js';
 export interface ChildSpec {
   type: string;
   params: Record<string, unknown>;
+  /**
+   * A skippable step that fails as `unsupported_op` (the mod has no handler for it — e.g.
+   * team_reset on the 1.12.2 tree) is recorded as skipped and the chain CONTINUES instead of
+   * checkpointing. Any other failure still checkpoints. NOTE: a mod updated later will not
+   * re-run a skipped step — create a fresh op for it.
+   */
+  skippable?: boolean;
+}
+
+/** Exact string the mod's OpExecutor emits for a missing handler — fallback for pre-`code` mods. */
+const UNSUPPORTED_ERROR_RX = /^unsupported op type '.+' on this server$/;
+
+/** True when this failed child should be treated as "not applicable here" rather than an error. */
+export function isSkipped(spec: ChildSpec | undefined, child: OpDoc): boolean {
+  if (!spec?.skippable || child.state !== 'failed') return false;
+  const res = child.result as { code?: string; error?: string } | null;
+  return res?.code === 'unsupported_op' || UNSUPPORTED_ERROR_RX.test(res?.error ?? '');
 }
 
 /**
@@ -32,11 +49,12 @@ export function accountResetChildren(params: Record<string, unknown>): ChildSpec
       ? { type: 'claims_release', params: {} }
       : { type: 'claims_transfer', params: { holdTeam } };
   return [
+    // the snapshot is the restore point — NOT skippable, its failure always checkpoints
     { type: 'inspect_inventory', params: {} },
-    { type: 'quest_reset', params: {} }, // no questId = reset ALL
-    claims,
-    { type: 'team_reset', params: {} },
-    { type: 'inventory_clear', params: {} },
+    { type: 'quest_reset', params: {}, skippable: true }, // no questId = reset ALL
+    { ...claims, skippable: true },
+    { type: 'team_reset', params: {}, skippable: true },
+    { type: 'inventory_clear', params: {}, skippable: true },
   ];
 }
 
@@ -67,10 +85,24 @@ export class CompoundOps {
       } else if (op.state === 'failed' || op.state === 'expired' || op.state === 'cancelled') {
         const parent = await this.store.get(op.parentOpId);
         if (!parent || parent.state !== 'pending') return;
+        const spec = this.specsFor(parent)?.[op.childIndex];
+        if (isSkipped(spec, op)) {
+          // step is N/A on this server (no handler) — record it and keep the chain moving
+          await this.store.appendAudit(
+            parent._id,
+            `child ${op.childIndex} (${op.type}) skipped — unsupported on this server`,
+          );
+          logger.info(
+            { parentOpId: parent._id, childIndex: op.childIndex, type: op.type },
+            'biforesting-compound: child skipped (unsupported on this server)',
+          );
+          await this.advance(op.parentOpId);
+          return;
+        }
         const failed = await this.store.markFailed(
           parent._id,
           `child ${op.childIndex} (${op.type}) ${op.state}: ${(op.result as { error?: string } | null)?.error ?? ''}`,
-          { ok: false, error: `checkpoint at child ${op.childIndex} (${op.type})`, data: await this.childSummary(parent._id) },
+          { ok: false, error: `checkpoint at child ${op.childIndex} (${op.type})`, data: await this.childSummary(parent) },
         );
         if (failed) this.emit(failed);
       }
@@ -104,17 +136,19 @@ export class CompoundOps {
     for (let i = 0; i < specs.length; i++) {
       const forIndex = children.filter((c) => c.childIndex === i);
       const settled = forIndex.some((c) => CHILD_SETTLED_OR_RUNNING.includes(c.state));
-      const done = forIndex.some((c) => c.state === 'completed');
-      if (done) continue; // step already succeeded — next
+      // a skipped (unsupported-op) child counts as done — this also makes resume() correct for
+      // free: a skipped step is never respawned
+      const done = forIndex.some((c) => c.state === 'completed' || isSkipped(specs[i], c));
+      if (done) continue; // step already succeeded/skipped — next
       if (settled) return; // running/parked — the chain waits for it
       await this.spawnChild(parent, i);
       return; // one live child at a time — its completion advances the chain
     }
 
-    // every spec index has a completed child → parent success
+    // every spec index has a completed (or skipped) child → parent success
     const completed = await this.store.completeCompound(parentOpId, {
       ok: true,
-      data: await this.childSummary(parentOpId),
+      data: await this.childSummary(parent),
     });
     if (completed) this.emit(completed);
   }
@@ -146,11 +180,21 @@ export class CompoundOps {
     return factory ? factory(parent.params) : null;
   }
 
-  private async childSummary(parentOpId: string): Promise<{ children: Array<{ opId: string; childIndex: number | null; type: string; state: string; result: unknown }> }> {
-    const children = await this.store.childrenOf(parentOpId);
-    return {
-      children: children.map((c) => ({ opId: c._id, childIndex: c.childIndex ?? null, type: c.type, state: c.state, result: c.result })),
-    };
+  private async childSummary(parent: OpDoc): Promise<{
+    children: Array<{ opId: string; childIndex: number | null; type: string; state: string; skipped: boolean; result: unknown }>;
+    skippedTypes: string[];
+  }> {
+    const specs = this.specsFor(parent) ?? [];
+    const children = await this.store.childrenOf(parent._id);
+    const rows = children.map((c) => ({
+      opId: c._id,
+      childIndex: c.childIndex ?? null,
+      type: c.type,
+      state: c.state,
+      skipped: isSkipped(c.childIndex !== null && c.childIndex !== undefined ? specs[c.childIndex] : undefined, c),
+      result: c.result,
+    }));
+    return { children: rows, skippedTypes: rows.filter((r) => r.skipped).map((r) => r.type) };
   }
 
   private emit(op: OpDoc): void {

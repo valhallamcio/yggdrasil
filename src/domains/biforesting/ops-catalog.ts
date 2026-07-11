@@ -13,6 +13,13 @@ export interface OpCatalogEntry {
   risk: 'safe' | 'reversible' | 'confirm' | 'dangerous';
   /** Apply (non-dry-run) must reference a fresh completed dry-run of the same type+target. */
   requiresDryRunConfirm?: boolean;
+  /**
+   * Create requires an explicit `flags.confirm: true` — the server-side half of the Discord
+   * confirmation flow, so a raw REST caller can't fire a dangerous op by accident.
+   */
+  requiresConfirm?: boolean;
+  /** A fresh inspect_inventory snapshot is auto-prepended before a directly-created apply. */
+  autoSnapshot?: boolean;
   description: string;
 }
 
@@ -120,12 +127,14 @@ export const OPS_CATALOG: Record<string, OpCatalogEntry> = {
     description: 'Complete a single task by its id (FTBQ task ids share the quest id space; BQ treats it as quest complete).',
   },
   quest_reset: {
+    requiresConfirm: true,
     params: z.object({ questId: z.string().min(1).max(64).optional() }).strict(),
     serverGlobal: false,
     risk: 'dangerous',
     description: 'Reset quest progress for a player — omitting questId resets ALL quests.',
   },
   team_reset: {
+    requiresConfirm: true,
     params: z.object({}).strict(),
     serverGlobal: false,
     risk: 'dangerous',
@@ -138,18 +147,22 @@ export const OPS_CATALOG: Record<string, OpCatalogEntry> = {
     description: "Move every claim of the player's team to the server-owned hold team (default 'valhallamc', created on demand) keeping force-load state (D15).",
   },
   claims_release: {
+    requiresConfirm: true,
     params: z.object({}).strict(),
     serverGlobal: false,
     risk: 'dangerous',
     description: "Unclaim everything the player's team owns (prefer claims_transfer — no-grief default).",
   },
   inventory_clear: {
+    requiresConfirm: true,
+    autoSnapshot: true,
     params: z.object({}).strict(),
     serverGlobal: false,
     risk: 'dangerous',
     description: 'Empty main+armor+offhand+ender inventory of an ONLINE player (account_reset snapshots first).',
   },
   account_reset: {
+    requiresConfirm: true,
     params: z
       .object({
         holdTeam: z.string().min(1).max(64).optional(),

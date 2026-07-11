@@ -202,6 +202,8 @@ export interface OpResult {
   ok: boolean;
   data?: unknown;
   error?: string;
+  /** Machine-readable failure code from the mod (e.g. `unsupported_op`). */
+  code?: string;
   durationMs?: number;
 }
 
@@ -243,6 +245,8 @@ export interface OpResMsg {
   status?: 'completed' | 'failed' | 'waiting_player';
   result?: unknown;
   error?: string;
+  /** Machine-readable failure code (e.g. `unsupported_op`) — compound skip logic keys on it. */
+  code?: string;
   durationMs?: number;
   /** True when the mod answered from its dedup journal instead of re-executing. */
   journalReplay?: boolean;

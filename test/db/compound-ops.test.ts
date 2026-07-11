@@ -82,7 +82,7 @@ before(async () => {
   mongo = await startTestMongo();
   store = new OpsStore(() => mongo.client.db('ygg_compound_test'));
   setPolicyDbProvider(() => mongo.client.db('ygg_compound_test'));
-  for (const key of ['pack-a', 'pack-f', 'pack-r', 'pack-w', 'pack-d']) {
+  for (const key of ['pack-a', 'pack-f', 'pack-r', 'pack-w', 'pack-d', 'pack-u', 'pack-g', 'pack-n']) {
     await setPolicy(key, { enabledFeatures: maskForFeatures(['play_transport', 'ops']) }, 'test');
   }
 });
@@ -214,4 +214,93 @@ test('compound: parent never appears in findDispatchable', async () => {
   const parent = await mkParent('pack-d');
   const dispatchable = await store.findDispatchable('pack-d');
   assert.ok(dispatchable.every((op) => op._id !== parent._id), 'compound parents are never wire-dispatched');
+});
+
+/** Fail a child as unsupported and wait for the chain's reaction (skip-advance or checkpoint). */
+async function failUnsupported(
+  stack: ReturnType<typeof mkStack>,
+  instanceKey: string,
+  opId: string,
+  parentId: string,
+  opts: { code?: boolean } = { code: true },
+) {
+  const sentBefore = stack.port.sent.length;
+  await stack.dispatcher.onOpRes(instanceKey, { opId, phase: 'ack' });
+  await stack.dispatcher.onOpRes(instanceKey, {
+    opId,
+    phase: 'result',
+    status: 'failed',
+    error: "unsupported op type 'whatever' on this server",
+    ...(opts.code ? { code: 'unsupported_op' } : {}),
+  });
+  await waitFor(async () => {
+    if (stack.port.sent.length > sentBefore) return true;
+    const p = await store.get(parentId);
+    return PARENT_TERMINAL.has(p?.state ?? '');
+  }, `reaction to unsupported child ${opId}`);
+}
+
+test('compound: a skippable child failing as unsupported_op is skipped and the chain completes', async () => {
+  const stack = mkStack('pack-u');
+  const parent = await mkParent('pack-u');
+  await stack.compound.expand(parent);
+
+  // child 0 (snapshot) completes; child 1 (quest_reset) is unsupported on this backend
+  await completeChild(stack, 'pack-u', stack.port.sent[0]!.body['opId'] as string, parent._id);
+  await failUnsupported(stack, 'pack-u', stack.port.sent[1]!.body['opId'] as string, parent._id);
+
+  // the chain moved PAST the unsupported step instead of checkpointing
+  assert.equal(stack.port.sent.length, 3, 'next child spawned after the skip');
+  assert.equal(stack.port.sent[2]!.body['type'], 'claims_transfer');
+
+  for (let i = 2; i < stack.port.sent.length && stack.port.sent.length <= 5; i++) {
+    await completeChild(stack, 'pack-u', stack.port.sent[i]!.body['opId'] as string, parent._id);
+  }
+  const done = await store.get(parent._id);
+  assert.equal(done?.state, 'completed', 'parent completes despite the skipped step');
+  const data = (done?.result as { data?: { skippedTypes?: string[]; children?: Array<{ type: string; skipped: boolean }> } })?.data;
+  assert.deepEqual(data?.skippedTypes, ['quest_reset']);
+  assert.ok(data?.children?.find((c) => c.type === 'quest_reset')?.skipped, 'summary marks the skip');
+  assert.ok(
+    done?.audit.some((a) => (a.note ?? '').includes('skipped — unsupported')),
+    'parent audit records the skip',
+  );
+});
+
+test('compound: the unsupported-error REGEX alone (no code field — old mod) still skips', async () => {
+  const stack = mkStack('pack-g');
+  const parent = await mkParent('pack-g');
+  await stack.compound.expand(parent);
+
+  await completeChild(stack, 'pack-g', stack.port.sent[0]!.body['opId'] as string, parent._id);
+  await failUnsupported(stack, 'pack-g', stack.port.sent[1]!.body['opId'] as string, parent._id, { code: false });
+  assert.equal(stack.port.sent.length, 3, 'regex fallback advanced the chain');
+  assert.equal((await store.get(parent._id))?.state, 'pending', 'no checkpoint');
+});
+
+test('compound: the leading snapshot is NOT skippable — unsupported there checkpoints; resume never respawns a skipped step', async () => {
+  const stack = mkStack('pack-n');
+  const parent = await mkParent('pack-n');
+  await stack.compound.expand(parent);
+
+  // child 0 = inspect_inventory: unsupported must CHECKPOINT (it is the restore point)
+  await failUnsupported(stack, 'pack-n', stack.port.sent[0]!.body['opId'] as string, parent._id);
+  assert.equal((await store.get(parent._id))?.state, 'failed', 'snapshot failure always checkpoints');
+  assert.equal(stack.port.sent.length, 1, 'chain did not advance');
+
+  // resume → fresh child 0; complete it, then SKIP child 1, then REAL-fail child 2
+  await stack.compound.resume(parent._id);
+  await completeChild(stack, 'pack-n', stack.port.sent[1]!.body['opId'] as string, parent._id);
+  await failUnsupported(stack, 'pack-n', stack.port.sent[2]!.body['opId'] as string, parent._id);
+  assert.equal(stack.port.sent[3]!.body['type'], 'claims_transfer', 'skip advanced to child 2');
+  const child2Id = stack.port.sent[3]!.body['opId'] as string;
+  await stack.dispatcher.onOpRes('pack-n', { opId: child2Id, phase: 'ack' });
+  await stack.dispatcher.onOpRes('pack-n', { opId: child2Id, phase: 'result', status: 'failed', error: 'FTB Chunks absent' });
+  await waitFor(async () => (await store.get(parent._id))?.state === 'failed', 'real failure checkpoints');
+
+  // resume: respawns ONLY the really-failed step — the skipped quest_reset is not retried
+  const before = stack.port.sent.length;
+  await stack.compound.resume(parent._id);
+  assert.equal(stack.port.sent.length, before + 1, 'exactly one respawn');
+  assert.equal(stack.port.sent[before]!.body['type'], 'claims_transfer', 'the skipped step stays skipped');
 });

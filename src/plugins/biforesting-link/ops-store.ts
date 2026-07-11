@@ -185,6 +185,20 @@ export class OpsStore {
     );
   }
 
+  /** Append a state-preserving audit note (e.g. a compound child skipped as unsupported). */
+  async appendAudit(opId: string, note: string): Promise<void> {
+    const now = new Date();
+    const op = await this.get(opId);
+    if (!op) return;
+    await this.col().updateOne(
+      { _id: opId },
+      {
+        $set: { updatedAt: now },
+        $push: { audit: { at: now, from: op.state, to: op.state, note } },
+      },
+    );
+  }
+
   /** Mod reported the target offline for a queue-mode op — parks until a presence join. */
   async markWaitingPlayer(opId: string): Promise<OpDoc | null> {
     return this.transition(opId, ['dispatched', 'acked'], 'waiting_player', {}, 'target offline — queued for next login');
