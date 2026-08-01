@@ -13,10 +13,12 @@ import { latestStored, rawHistory, hourlyHistory } from '../../plugins/biforesti
 import { serverResolver } from '../../plugins/biforesting-link/server-resolver.js';
 import { NotFoundError, ValidationError } from '../../shared/errors/index.js';
 import { catalogEntry, dryRunConfirmError, OPS_CATALOG } from './ops-catalog.js';
+import { settlePreApplySnapshot } from './settle-snapshot.js';
 import type { LinkServerParams, PolicyPutBody, QuestDownBody, ChunksDownBody, OpCreateBody, OpIdParams, OpListQuery, MetricsHistoryQuery, PlayerInvParams, SnapshotIdParams, QuestSearchQuery, ItemSearchQuery, PackParams, PackIconParams, PackLangBody, IconsUploadBody } from './biforesting.schema.js';
 
 const QUEST_CHANNEL = 'biforesting:quest';
 const CHUNKS_CHANNEL = 'biforesting:chunks';
+
 
 export class BiforestingController {
   /** Observability: snapshot of all live link sessions. */
@@ -379,7 +381,14 @@ export class BiforestingController {
         target: body.target ?? null,
         createdBy: 'auto:pre-apply-snapshot',
       });
-      void opDispatcher.onOpCreated(snap);
+      // Must SETTLE before the apply is created, not just be dispatched. On the mod's offline
+      // path the snapshot and the apply both claim OfflineEditGuard for the same uuid, so a
+      // concurrent dispatch made the apply lose a ~6 ms race and fail with "another offline
+      // edit is running" — intermittently, which is why tests never caught it (found on the
+      // mce2 canary 2026-08-01). Best-effort: a failed or slow snapshot must not block the
+      // apply, so we proceed once it leaves flight or the budget expires.
+      await opDispatcher.onOpCreated(snap);
+      await settlePreApplySnapshot(snap._id, opsStore);
     }
 
     const compound = body.type in COMPOUND_TYPES;
