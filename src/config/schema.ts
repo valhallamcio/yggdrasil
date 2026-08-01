@@ -72,6 +72,18 @@ export const configSchema = z.object({
       message: 'PLUGIN_BIFORESTING_LINK=true requires BIFORESTING_PSK or BIFORESTING_AUTHKEY_HEX',
     });
   }
+
+  // The /biforesting/ listener is stood up inside WebSocketPlugin, so the link plugin
+  // alone gives you REST + the ops dispatcher but nothing for a game server to dial —
+  // it boots clean and every mod fails to connect in silence. WS is the only transport
+  // (raw TCP was removed), so this combination is never valid; fail the boot instead.
+  if (data.PLUGIN_BIFORESTING_LINK && !data.PLUGIN_WEBSOCKET) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['PLUGIN_WEBSOCKET'],
+      message: 'PLUGIN_BIFORESTING_LINK=true requires PLUGIN_WEBSOCKET=true (the /biforesting/ WS listener lives in the websocket plugin)',
+    });
+  }
 });
 
 export type Config = z.output<typeof configSchema>;
