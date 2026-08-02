@@ -161,6 +161,21 @@ export const OPS_CATALOG: Record<string, OpCatalogEntry> = {
     risk: 'dangerous',
     description: 'Empty main+armor+offhand+ender inventory of an ONLINE player (account_reset snapshots first).',
   },
+  restore_inventory: {
+    requiresConfirm: true,
+    autoSnapshot: true,
+    params: z
+      .object({
+        snapshotId: z.string().min(1).max(64),
+        mode: z.enum(['replace', 'fill']).optional(),
+        slots: z.array(z.number().int().min(0).max(1023)).min(1).max(256).optional(),
+      })
+      .strict(),
+    serverGlobal: false,
+    risk: 'dangerous',
+    description:
+      'Put a player back exactly as a snapshot had them — slot-exact, armor in armor slots, full NBT. mode=replace (default) overwrites the inventory; mode=fill only touches slots that are now empty; slots[] restricts it to specific slots (ender = 100+i). The gz blob is attached at dispatch; a pre-restore snapshot is auto-taken so it can be undone.',
+  },
   account_reset: {
     requiresConfirm: true,
     params: z

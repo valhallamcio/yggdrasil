@@ -221,6 +221,16 @@ export function encodeJsonPayload(json: string): Buffer {
   return new Writer().varInt(1).utf(json).build();
 }
 
+/**
+ * v2 op envelope: `[varint 2][utf json][varint blobLen][blob]`. The mod's `WireIO.MAX_STR` caps
+ * the JSON string at 64 KB, so an op that must carry bytes (restore_inventory's gzipped snapshot
+ * NBT, up to 256 KB) cannot base64 them into the JSON — they ride alongside as raw bytes.
+ */
+export function encodeJsonPayloadWithBlob(json: string, blob: Buffer): Buffer {
+  const w = new Writer().varInt(2).utf(json).varInt(blob.length);
+  return Buffer.concat([w.build(), blob]);
+}
+
 export function decodeJsonPayload(payload: Buffer): unknown {
   const r = new Reader(payload);
   r.varInt(); // version

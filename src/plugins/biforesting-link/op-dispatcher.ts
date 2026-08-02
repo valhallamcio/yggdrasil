@@ -1,6 +1,7 @@
 import { eventBus } from '../../core/event-bus/index.js';
 import { logger } from '../../core/logger/index.js';
-import { encodeJsonPayload } from './decoders.js';
+import { encodeJsonPayload, encodeJsonPayloadWithBlob } from './decoders.js';
+import { getSnapshot } from './inv-store.js';
 import { getPolicy, FEATURE_BITS } from './policy-store.js';
 import type { OpsStore } from './ops-store.js';
 import type { OpDoc, OpResMsg, PresenceMsg } from './types.js';
@@ -92,22 +93,71 @@ export class OpDispatcher {
     if (!dispatched) return false; // raced by cancel/expiry/another dispatch
     this.emitUpdated(dispatched);
 
+    // restore_inventory carries only a snapshotId on the doc; the opaque gz blob is attached
+    // HERE so the stored op stays small and a re-dispatch always re-reads the live snapshot.
+    let params = dispatched.params;
+    let blob: Buffer | null = null;
+    if (dispatched.type === 'restore_inventory') {
+      const hydrated = await this.hydrateRestore(dispatched);
+      if (!hydrated) return false; // already marked failed with the reason
+      params = hydrated.params;
+      blob = hydrated.blob;
+    }
+
     const wire = JSON.stringify({
       opId: dispatched._id,
       type: dispatched.type,
-      params: dispatched.params,
+      params,
       target: dispatched.target,
       flags: dispatched.flags,
       execTimeoutMs: dispatched.execTimeoutMs,
       expiresAt: dispatched.expiresAt.getTime(),
     });
-    const ok = this.port.sendDown(dispatched.instanceKey, OP_CHANNEL, encodeJsonPayload(wire));
+    const payload = blob ? encodeJsonPayloadWithBlob(wire, blob) : encodeJsonPayload(wire);
+    const ok = this.port.sendDown(dispatched.instanceKey, OP_CHANNEL, payload);
     if (!ok) {
       const requeued = await this.store.requeueUnwritable(dispatched._id);
       if (requeued) this.emitUpdated(requeued);
       logger.debug({ opId: op._id, instanceKey: op.instanceKey }, 'biforesting-ops: link gone mid-dispatch — eagerly requeued');
     }
     return ok;
+  }
+
+  /**
+   * Attach the snapshot's opaque gz blob to a `restore_inventory` dispatch. The blob is NEVER
+   * parsed here (same rule as ingest — restore tooling is mod-side); Node only base64s it.
+   * Returns null after marking the op failed when the snapshot can't legitimately be applied.
+   */
+  private async hydrateRestore(op: OpDoc): Promise<{ params: Record<string, unknown>; blob: Buffer } | null> {
+    const snapshotId = String(op.params['snapshotId'] ?? '');
+    const fail = async (reason: string): Promise<null> => {
+      const failed = await this.store.markFailed(op._id, reason);
+      if (failed) this.emitUpdated(failed);
+      logger.warn({ opId: op._id, snapshotId, reason }, 'biforesting-ops: restore_inventory rejected');
+      return null;
+    };
+
+    const snap = await getSnapshot(snapshotId);
+    if (!snap) return fail(`snapshot ${snapshotId} not found (ring may have rolled over)`);
+    if (snap.instanceKey !== op.instanceKey) {
+      return fail(`snapshot belongs to ${snap.instanceKey}, not ${op.instanceKey}`);
+    }
+    // Restoring one player's inventory onto another is never a typo worth honouring.
+    const t = op.target;
+    const matches = t ? (t.uuid ? t.uuid === snap.uuid : t.name?.toLowerCase() === snap.name.toLowerCase()) : false;
+    if (!matches) {
+      return fail(`snapshot is ${snap.name}'s, but the op targets ${t?.uuid ?? t?.name ?? 'nobody'}`);
+    }
+
+    return {
+      params: {
+        ...op.params,
+        dataVersion: snap.dataVersion,
+        takenAt: snap.takenAt.getTime(),
+        reason: snap.reason,
+      },
+      blob: Buffer.from(snap.gz.buffer),
+    };
   }
 
   /** Called by the link manager when a resolved backend registers (link-up). */
