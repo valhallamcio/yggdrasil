@@ -51,6 +51,16 @@ export const configSchema = z.object({
 
   DISCORD_SCREENSHOT_CHANNEL_ID: z.string().optional(),
 
+  // #announcements → Bifrost `notices` mirror (plan-player-ux §4.C). Off by
+  // default; the whole feature is inert unless enabled AND a channel is set.
+  ANNOUNCEMENTS_MIRROR_ENABLED: booleanFromString.default('false'),
+  ANNOUNCEMENTS_MIRROR_CHANNEL_ID: z.string().optional(),
+  ANNOUNCEMENTS_MIRROR_TTL_DAYS: numberFromString('7'),
+  ANNOUNCEMENTS_MIRROR_WEIGHT: numberFromString('1'),
+  ANNOUNCEMENTS_MIRROR_PREFIX: z.string().default('<gray>[Discord]</gray> '),
+  // The DB Bifrost's `notices` collection lives in (its own MONGODB_DATABASE).
+  ANNOUNCEMENTS_MIRROR_DB_NAME: z.string().default('bifrost'),
+
   PTERODACTYL_URL: z.string().url().optional(),
   PTERODACTYL_API_KEY: z.string().optional(),
   DISCORD_SERVER_STATUS_CHANNEL_ID: z.string().optional(),
@@ -82,6 +92,24 @@ export const configSchema = z.object({
       code: z.ZodIssueCode.custom,
       path: ['PLUGIN_WEBSOCKET'],
       message: 'PLUGIN_BIFORESTING_LINK=true requires PLUGIN_WEBSOCKET=true (the /biforesting/ WS listener lives in the websocket plugin)',
+    });
+  }
+
+  // The mirror rides the Discord plugin's gateway client (there is only ever
+  // one) and has nothing to listen to without a channel — both are boot errors
+  // rather than a feature that silently does nothing all month.
+  if (data.ANNOUNCEMENTS_MIRROR_ENABLED && !data.PLUGIN_DISCORD) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['PLUGIN_DISCORD'],
+      message: 'ANNOUNCEMENTS_MIRROR_ENABLED=true requires PLUGIN_DISCORD=true (the mirror reuses that gateway client)',
+    });
+  }
+  if (data.ANNOUNCEMENTS_MIRROR_ENABLED && !data.ANNOUNCEMENTS_MIRROR_CHANNEL_ID) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['ANNOUNCEMENTS_MIRROR_CHANNEL_ID'],
+      message: 'ANNOUNCEMENTS_MIRROR_ENABLED=true requires ANNOUNCEMENTS_MIRROR_CHANNEL_ID',
     });
   }
 });

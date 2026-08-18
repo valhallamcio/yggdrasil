@@ -4,6 +4,7 @@ import type { Server as HttpServer } from 'node:http';
 import { config } from '../../config/index.js';
 import { eventBus } from '../../core/event-bus/index.js';
 import { logger } from '../../core/logger/index.js';
+import { AnnouncementsMirror, type MirrorMessage } from './announcements-mirror.js';
 
 // discord.js is an optional dependency — install with: npm install discord.js
 // It is only imported when PLUGIN_DISCORD=true
@@ -42,7 +43,14 @@ export class DiscordPlugin implements Plugin {
     }
 
     // Dynamic import keeps discord.js out of the startup path when plugin is disabled
-    const { Client, GatewayIntentBits } = await import('discord.js');
+    const { Client, GatewayIntentBits, Partials } = await import('discord.js');
+
+    // Partials only when the announcements mirror is on: without them an edit
+    // or a delete of a message older than the cache emits nothing at all, and
+    // with the mirror off they would just widen what the gateway delivers.
+    /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access */
+    const partials: unknown[] = config.ANNOUNCEMENTS_MIRROR_ENABLED ? [Partials.Message, Partials.Channel] : [];
+    /* eslint-enable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access */
 
     // eslint-disable-next-line @typescript-eslint/no-unsafe-call
     this.client = new Client({
@@ -51,6 +59,7 @@ export class DiscordPlugin implements Plugin {
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
       ],
+      partials,
     });
 
     // Discord events → internal events
@@ -59,6 +68,8 @@ export class DiscordPlugin implements Plugin {
       // TODO: dispatch to slash command handlers in commands/
       logger.warn({ plugin: this.name }, 'Interaction received but no handler is registered');
     });
+
+    this.registerAnnouncementsMirror();
 
     // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
     await this.client.login(config.DISCORD_TOKEN);
@@ -125,6 +136,42 @@ export class DiscordPlugin implements Plugin {
       if (!channelId) return;
       void this.sendMessage(channelId, `**${serverName}** (\`${server}\`) is no longer crash looping.`);
     });
+  }
+
+  /**
+   * Mirrors `#announcements` posts into Bifrost's `notices` so players who are
+   * not in Discord read them in game. Off unless both config keys are set (the
+   * schema refuses `enabled` without a channel), and the gateway client is the
+   * one above — never a second connection.
+   */
+  private registerAnnouncementsMirror(): void {
+    const channelId = config.ANNOUNCEMENTS_MIRROR_CHANNEL_ID;
+    if (!config.ANNOUNCEMENTS_MIRROR_ENABLED || !channelId) return;
+
+    const mirror = new AnnouncementsMirror({
+      channelId,
+      prefix: config.ANNOUNCEMENTS_MIRROR_PREFIX,
+      weight: config.ANNOUNCEMENTS_MIRROR_WEIGHT,
+      ttlDays: config.ANNOUNCEMENTS_MIRROR_TTL_DAYS,
+      dbName: config.ANNOUNCEMENTS_MIRROR_DB_NAME,
+    });
+
+    /* eslint-disable @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access */
+    this.client.on('messageCreate', (message: MirrorMessage) => {
+      void mirror.onCreate(message);
+    });
+    this.client.on('messageUpdate', (_old: MirrorMessage, updated: MirrorMessage) => {
+      void mirror.onUpdate(updated);
+    });
+    this.client.on('messageDelete', (message: MirrorMessage) => {
+      void mirror.onDelete(message);
+    });
+    this.client.on('messageDeleteBulk', (messages: { values(): Iterable<MirrorMessage> }) => {
+      for (const message of messages.values()) void mirror.onDelete(message);
+    });
+    /* eslint-enable @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access */
+
+    logger.info({ plugin: this.name, channelId }, 'Announcements mirror enabled');
   }
 
   /**
