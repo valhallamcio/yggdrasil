@@ -83,10 +83,15 @@ const MENTION_RE = /<(?:@[!&]?\d+|#\d+|t:\d+(?::[tTdDfFR])?|id:[a-z]+)>/g;
 // Alternation, not one class: a class mixing pictographs with the joiner and
 // the variation selector is exactly what `no-misleading-character-class` warns
 // about, and each of these has to go on its own anyway.
-const EMOJI_RE = /\p{Extended_Pictographic}|[\u{1F1E6}-\u{1F1FF}]|\u{FE0F}|\u{200D}|\u{20E3}/gu;
+// A base pictograph is only half of one: skin-tone modifiers (U+1F3FB-1F3FF) and
+// TAG characters (U+E0020-E007F, the flag sequences) are separate code points, and
+// stripping the base alone left the modifier behind as its own missing-glyph box.
+const EMOJI_RE = /\p{Extended_Pictographic}|[\u{1F1E6}-\u{1F1FF}]|[\u{1F3FB}-\u{1F3FF}]|[\u{E0020}-\u{E007F}]|\u{FE0F}|\u{FE0E}|\u{200D}|\u{20E3}/gu;
 // Control characters and the § the chat renderer would read as a colour code.
+// U+202A-202E and U+2066-2069 are the bidi overrides and isolates: they REORDER
+// what follows them, so a post can be made to read as something it is not.
 // eslint-disable-next-line no-control-regex -- stripping them IS the point
-const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f\u00a7\u200b-\u200f\u2028\u2029\ufeff]/g;
+const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f\u00a7\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\u2028\u2029\ufeff]/g;
 
 /**
  * Discord markdown/mentions/emoji ids → plain readable text, then the rules a
@@ -175,13 +180,30 @@ export function buildNoticeDoc(
 }
 
 /** The prefix is ours, not a player's, but it rides the same card rules. */
+/** The prefix is ours, but it is still config: an unbounded one eats the body. */
+const PREFIX_CAP = 64;
+
 function sanitisePrefix(prefix: unknown): string {
   if (typeof prefix !== 'string') return '';
   // MiniMessage tags in the prefix are deliberate (`<gray>…</gray>`), so only
   // the newline/control/§ rules apply here.
   const flat = prefix.replace(CONTROL_RE, ' ').replace(/\s+/g, ' ');
+  if (flat.trim().length === 0) return '';
   // The trailing space is kept — it separates the prefix from the body.
-  return flat.trim().length === 0 ? '' : flat.trimStart();
+  return capMiniMessage(flat.trimStart(), PREFIX_CAP);
+}
+
+/**
+ * Cut without splitting a MiniMessage tag: half of a `<gray>` is not markup,
+ * it is a literal `<gra` the parser reads as the start of one and swallows
+ * whatever follows.
+ */
+function capMiniMessage(text: string, cap: number): string {
+  if (text.length <= cap) return text;
+  const cut = text.slice(0, cap);
+  const open = cut.lastIndexOf('<');
+  const close = cut.lastIndexOf('>');
+  return open > close ? cut.slice(0, open) : cut;
 }
 
 function clamp(value: unknown, min: number, max: number, fallback: number): number {
@@ -196,7 +218,7 @@ function validDate(value: unknown): Date | null {
 
 /** A deleted post is expired in place — `notices` keeps it listed as evidence. */
 export function buildExpiry(now: Date = new Date()): Document {
-  return { $set: { expiresAt: now, updatedAt: now, updatedBy: MIRROR_ACTOR } };
+  return { $set: { expiresAt: now, updatedAt: now, updatedBy: MIRROR_ACTOR, enabled: false } };
 }
 
 // ---------------------------------------------------------------------------
@@ -252,13 +274,16 @@ export class AnnouncementsMirror {
   }
 
   async onDelete(message: MirrorMessage): Promise<void> {
+    if (!this.mine(message)) return;
+    await this.expire(noticeIdFor(message.id as string), 'deleted in Discord');
+  }
+
+  /** No upsert, ever: this must not CREATE a notice for a post we skipped. */
+  private async expire(id: string, why: string): Promise<void> {
     try {
-      if (!this.mine(message)) return;
-      const id = noticeIdFor(message.id as string);
-      // No upsert: a delete must never CREATE a notice for a post we skipped.
       const result = await this.collection().updateOne({ id }, buildExpiry());
       if ((result.matchedCount ?? 0) > 0) {
-        logger.info({ plugin: 'discord', notice: id }, 'Mirrored announcement expired (deleted in Discord)');
+        logger.info({ plugin: 'discord', notice: id, why }, 'Mirrored announcement expired');
       }
     } catch (err) {
       logger.error({ err, plugin: 'discord' }, 'Failed to expire mirrored announcement');
@@ -280,13 +305,34 @@ export class AnnouncementsMirror {
         },
         this.config,
       );
-      // Nothing readable left (an image-only post, a sticker) — skipped rather
-      // than written as an empty card the validator would drop anyway.
-      if (!doc) return;
 
+      // Nothing readable left. On a CREATE that is an image-only post or a
+      // sticker: skipped rather than written as an empty card the validator
+      // would drop anyway. On an EDIT it is somebody removing the text of a
+      // post that IS live, and leaving the old body up until the TTL ran out
+      // would be the one thing they were trying to undo — so it expires.
+      if (!doc) {
+        if (via === 'update') await this.expire(noticeIdFor(full.id as string), 'edited to nothing');
+        return;
+      }
+
+      // A delete is a tombstone: a create/edit still in flight when it landed —
+      // or a re-delivered gateway event — must not put the announcement back in
+      // front of every player in game. A pipeline update keeps that decision on
+      // the SERVER (a read-then-write would just move the race), and it must
+      // stay one statement on `{id}`: filtering the tombstone out instead would
+      // make the upsert insert a SECOND doc with the same id.
+      const keepDead = { $eq: ['$enabled', false] };
       await this.collection().updateOne(
         { id: doc.id },
-        { $set: doc.set, $setOnInsert: { id: doc.id } },
+        [{
+          $set: {
+            ...doc.set,
+            id: doc.id,
+            enabled: { $cond: [keepDead, false, true] },
+            expiresAt: { $cond: [keepDead, '$expiresAt', doc.set.expiresAt] },
+          },
+        }],
         { upsert: true },
       );
       logger.info({ plugin: 'discord', notice: doc.id, via }, 'Mirrored Discord announcement into notices');

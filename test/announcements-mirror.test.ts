@@ -132,10 +132,13 @@ test('build: an empty post and a bogus message id build nothing', () => {
   assert.equal(buildNoticeDoc({ messageId: 'not-a-snowflake', content: 'hello', createdAt: POSTED }, OPTS, NOW), null);
 });
 
-test('expiry: the delete update only touches the window and the author', () => {
+test('expiry: the delete update closes the window and leaves a tombstone', () => {
   const update = buildExpiry(NOW) as { $set: Record<string, unknown> };
-  assert.deepEqual(Object.keys(update.$set).sort(), ['expiresAt', 'updatedAt', 'updatedBy']);
+  assert.deepEqual(Object.keys(update.$set).sort(), ['enabled', 'expiresAt', 'updatedAt', 'updatedBy']);
   assert.equal((update.$set.expiresAt as Date).getTime(), NOW.getTime());
+  // `enabled:false` is the tombstone a late create/edit checks against — without
+  // it, a re-delivered gateway event republishes an announcement staff deleted.
+  assert.equal(update.$set.enabled, false);
 });
 
 // --- the runtime handlers ---------------------------------------------------
@@ -147,18 +150,40 @@ interface Recorded {
 }
 
 /** A stand-in for `bifrost.notices`: applies the update the way Mongo would. */
+/** The `$cond`/`$eq`/`$field` subset the mirror's pipeline update uses. */
+function evalStage(value: unknown, doc: Document): unknown {
+  if (typeof value === 'string' && value.startsWith('$')) return doc[value.slice(1)];
+  if (value === null || typeof value !== 'object' || value instanceof Date || Array.isArray(value)) return value;
+  const expr = value as Record<string, unknown>;
+  if ('$cond' in expr) {
+    const [test, whenTrue, whenFalse] = expr.$cond as unknown[];
+    return evalStage(test, doc) ? evalStage(whenTrue, doc) : evalStage(whenFalse, doc);
+  }
+  if ('$eq' in expr) {
+    const [left, right] = expr.$eq as unknown[];
+    return evalStage(left, doc) === evalStage(right, doc);
+  }
+  return value;
+}
+
 function fakeCollection(): { coll: Collection<Document>; docs: Map<string, Document>; calls: Recorded[] } {
   const docs = new Map<string, Document>();
   const calls: Recorded[] = [];
   const coll = {
-    updateOne(filter: Document, update: Document, options?: { upsert?: boolean }) {
+    updateOne(filter: Document, update: Document | Document[], options?: { upsert?: boolean }) {
       const upsert = options?.upsert === true;
-      calls.push({ filter, update, upsert });
+      calls.push({ filter, update: Array.isArray(update) ? update[0]! : update, upsert });
       const id = filter.id as string;
       const existing = docs.get(id);
       if (!existing && !upsert) return Promise.resolve({ matchedCount: 0, upsertedCount: 0 });
-      const next = { ...(existing ?? {}), ...((update.$setOnInsert as Document) ?? {}), ...((update.$set as Document) ?? {}) };
-      docs.set(id, next);
+      // A pipeline update decides on the server, against the doc as it is now —
+      // that is what makes the tombstone hold, so the fake has to evaluate it
+      // rather than blindly merge the $set.
+      const stage = Array.isArray(update) ? (update[0]?.$set as Document) : null;
+      const merged = stage
+        ? Object.fromEntries(Object.entries(stage).map(([key, value]) => [key, evalStage(value, existing ?? {})]))
+        : { ...((update.$setOnInsert as Document) ?? {}), ...((update.$set as Document) ?? {}) };
+      docs.set(id, { ...(existing ?? {}), ...merged });
       return Promise.resolve({ matchedCount: existing ? 1 : 0, upsertedCount: existing ? 0 : 1 });
     },
   } as unknown as Collection<Document>;
@@ -184,7 +209,9 @@ test('mirror: the same message delivered twice is one doc, keyed by the message 
   for (const call of calls) {
     assert.deepEqual(call.filter, { id: noticeIdFor('900000000000000001') });
     assert.equal(call.upsert, true);
-    assert.deepEqual((call.update.$setOnInsert as Document).id, 'announcement.discord.900000000000000001');
+    // The id rides inside the pipeline's own $set now — an upsert built from a
+    // pipeline has no $setOnInsert to put it in.
+    assert.deepEqual((call.update.$set as Document).id, 'announcement.discord.900000000000000001');
   }
 });
 
@@ -286,4 +313,72 @@ test('config: enabling the mirror requires the discord plugin and a channel', ()
     ANNOUNCEMENTS_MIRROR_CHANNEL_ID: CHANNEL,
   });
   assert.equal(ok.success, true);
+});
+
+// --- the second review wave -------------------------------------------------
+
+test('sanitise: a skin tone or a flag leaves no orphan code point behind', () => {
+  // Stripping the base pictograph alone left the modifier as its own box.
+  assert.equal(sanitiseDiscordText('nice work 👍🏽 team'), 'nice work team');
+  assert.equal(sanitiseDiscordText('welcome 🏴󠁧󠁢󠁳󠁣󠁴󠁿 friends'), 'welcome friends');
+  // The keycap wrapper goes; the digit itself is readable and stays.
+  assert.equal(sanitiseDiscordText('count 1️⃣ two'), 'count 1 two');
+  for (const out of [sanitiseDiscordText('👍🏽'), sanitiseDiscordText('🏴󠁧󠁢󠁳󠁣󠁴󠁿')]) {
+    assert.equal(out, '', 'nothing but the emoji means nothing readable');
+  }
+});
+
+test('sanitise: bidi overrides and invisible joiners cannot reorder a card', () => {
+  // U+202E reverses what follows it — a post can be made to read as its opposite.
+  const flipped = sanitiseDiscordText('restart ‮reverse this‬ now');
+  assert.equal(/[‪-‮⁦-⁩]/u.test(flipped), false);
+  assert.equal(flipped, 'restart reverse this now');
+  assert.equal(/[⁠-⁤]/u.test(sanitiseDiscordText('a⁠b')), false);
+});
+
+test('build: an oversized prefix is bounded and never cut inside a MiniMessage tag', () => {
+  const built = buildNoticeDoc(
+    { messageId: '900000000000000001', content: 'hello', createdAt: POSTED },
+    { ...OPTS, prefix: `<gray>${'p'.repeat(200)}</gray> ` },
+    NOW,
+  );
+  assert.ok(built);
+  assert.equal(built.set.body.en.length <= NOTICE_BODY_CAP, true);
+  // Half of a `<gray>` is not markup — the parser reads it as the start of a
+  // tag and swallows the rest of the line.
+  const opens = (built.set.body.en.match(/</g) ?? []).length;
+  const closes = (built.set.body.en.match(/>/g) ?? []).length;
+  assert.ok(opens <= closes + 1, 'no dangling half-tag');
+  assert.equal(built.set.body.en.endsWith('<'), false);
+});
+
+test('mirror: a create that lands after the delete does not resurrect the notice', async () => {
+  const { mirror, docs } = mirrorWith();
+  await mirror.onCreate(message());
+  const id = noticeIdFor('900000000000000001');
+  assert.equal(docs.get(id)?.enabled, true);
+
+  await mirror.onDelete(message());
+  assert.equal(docs.get(id)?.enabled, false, 'the delete leaves a tombstone');
+
+  // The gateway re-delivers, or a create/edit was still in flight when the
+  // delete landed. Either way the announcement must stay dead.
+  await mirror.onCreate(message());
+  await mirror.onUpdate(message({ content: 'back from the dead' }));
+  assert.equal(docs.get(id)?.enabled, false, 'and nothing brings it back');
+  // The body may well be rewritten by the late edit — what must not happen is
+  // the notice going live again, and `enabled:false` is what players read.
+  assert.equal((docs.get(id)?.expiresAt as Date).getTime() <= Date.now(), true, 'the window stays closed too');
+});
+
+test('mirror: an edit down to nothing expires the notice instead of leaving the old body up', async () => {
+  const { mirror, docs } = mirrorWith();
+  await mirror.onCreate(message());
+  const id = noticeIdFor('900000000000000001');
+  assert.equal(docs.get(id)?.enabled, true);
+
+  // Somebody edits the text out of a live post (an image-only edit). Leaving
+  // the previous body live until the TTL is the one thing they were undoing.
+  await mirror.onUpdate(message({ content: '   🎉   ' }));
+  assert.equal(docs.get(id)?.enabled, false);
 });
