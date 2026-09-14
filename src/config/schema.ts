@@ -58,8 +58,11 @@ export const configSchema = z.object({
   ANNOUNCEMENTS_MIRROR_TTL_DAYS: numberFromString('7'),
   ANNOUNCEMENTS_MIRROR_WEIGHT: numberFromString('1'),
   ANNOUNCEMENTS_MIRROR_PREFIX: z.string().default('<gray>[Discord]</gray> '),
-  // The DB Bifrost's `notices` collection lives in (its own MONGODB_DATABASE).
-  ANNOUNCEMENTS_MIRROR_DB_NAME: z.string().default('bifrost'),
+  // The DB Bifrost's `notices` collection lives in. Optional: the wiring
+  // resolves it as ANNOUNCEMENTS_MIRROR_DB_NAME → Bifrost's own
+  // MONGODB_DATABASE → 'valhallamc' (Bifrost's code default), so the two
+  // sides can never silently disagree.
+  ANNOUNCEMENTS_MIRROR_DB_NAME: z.string().optional(),
 
   PTERODACTYL_URL: z.string().url().optional(),
   PTERODACTYL_API_KEY: z.string().optional(),

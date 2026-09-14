@@ -216,9 +216,17 @@ function validDate(value: unknown): Date | null {
   return value;
 }
 
-/** A deleted post is expired in place — `notices` keeps it listed as evidence. */
-export function buildExpiry(now: Date = new Date()): Document {
-  return { $set: { expiresAt: now, updatedAt: now, updatedBy: MIRROR_ACTOR, enabled: false } };
+/**
+ * A post leaving the rotation is expired in place — `notices` keeps it
+ * listed as evidence. A DELETE also marks the tombstone (`enabled:false`):
+ * the post is gone from Discord, so a re-delivered create/edit must not
+ * republish it. An edit down to nothing only closes the window: the post
+ * still exists in Discord, and a later edit that restores the text revives it.
+ */
+export function buildExpiry(now: Date = new Date(), tombstone = true): Document {
+  const $set: Record<string, unknown> = { expiresAt: now, updatedAt: now, updatedBy: MIRROR_ACTOR };
+  if (tombstone) $set['enabled'] = false;
+  return { $set };
 }
 
 // ---------------------------------------------------------------------------
@@ -247,6 +255,17 @@ export interface MirrorConfig extends MirrorOptions {
 /** The mongo seam — the tests hand in a recorder instead of a real collection. */
 export type CollectionFactory = () => Collection<Document>;
 
+/**
+ * The DB Bifrost's `notices` collection lives in, resolved the way Bifrost
+ * resolves its own name (`MONGODB_DATABASE ?? 'valhallamc'`, mongo-adapter):
+ * an explicit override, then Bifrost's env name, then Bifrost's code default.
+ * A silent default mismatch writes mirrored announcements into a DB nobody
+ * reads, so the chain is the fix, not a shared constant.
+ */
+export function resolveMirrorDbName(env: Record<string, string | undefined> = process.env): string {
+  return env['ANNOUNCEMENTS_MIRROR_DB_NAME'] || env['MONGODB_DATABASE'] || 'valhallamc';
+}
+
 export class AnnouncementsMirror {
   private readonly collection: CollectionFactory;
 
@@ -264,24 +283,54 @@ export class AnnouncementsMirror {
     return !!message && typeof message.id === 'string' && message.channelId === this.config.channelId;
   }
 
+  /**
+   * One queue per message id. Gateway delivery is ordered, but the handlers
+   * below are void-fired and their Mongo round trips are not: without this,
+   * a slow expire (edit A cleared the text, edit B restored it) can land
+   * after B's upsert and kill a live announcement. Chained per id, every op
+   * for one post lands in delivery order. Every op catches its own errors,
+   * so one failure never poisons the chain for the next.
+   */
+  private readonly queues = new Map<string, Promise<void>>();
+
+  private enqueue(messageId: string, op: () => Promise<void>): Promise<void> {
+    const prev = this.queues.get(messageId) ?? Promise.resolve();
+    const done = prev.then(op).catch(() => {});
+    this.queues.set(messageId, done);
+    void done.finally(() => {
+      if (this.queues.get(messageId) === done) this.queues.delete(messageId);
+    });
+    return done;
+  }
+
+  /** The message id, when the event is ours to mirror. */
+  private ownId(message: MirrorMessage | null | undefined): string | null {
+    return this.mine(message) ? (message!.id as string) : null;
+  }
+
   async onCreate(message: MirrorMessage): Promise<void> {
-    await this.upsert(message, 'create');
+    const id = this.ownId(message);
+    if (id === null) return;
+    await this.enqueue(id, () => this.upsert(message, 'create'));
   }
 
   /** An edit lands on the same doc — same id, new body. */
   async onUpdate(message: MirrorMessage): Promise<void> {
-    await this.upsert(message, 'update');
+    const id = this.ownId(message);
+    if (id === null) return;
+    await this.enqueue(id, () => this.upsert(message, 'update'));
   }
 
   async onDelete(message: MirrorMessage): Promise<void> {
-    if (!this.mine(message)) return;
-    await this.expire(noticeIdFor(message.id as string), 'deleted in Discord');
+    const id = this.ownId(message);
+    if (id === null) return;
+    await this.enqueue(id, () => this.expire(noticeIdFor(id), 'deleted in Discord'));
   }
 
   /** No upsert, ever: this must not CREATE a notice for a post we skipped. */
-  private async expire(id: string, why: string): Promise<void> {
+  private async expire(id: string, why: string, tombstone = true): Promise<void> {
     try {
-      const result = await this.collection().updateOne({ id }, buildExpiry());
+      const result = await this.collection().updateOne({ id }, buildExpiry(new Date(), tombstone));
       if ((result.matchedCount ?? 0) > 0) {
         logger.info({ plugin: 'discord', notice: id, why }, 'Mirrored announcement expired');
       }
@@ -310,9 +359,11 @@ export class AnnouncementsMirror {
       // sticker: skipped rather than written as an empty card the validator
       // would drop anyway. On an EDIT it is somebody removing the text of a
       // post that IS live, and leaving the old body up until the TTL ran out
-      // would be the one thing they were trying to undo — so it expires.
+      // would be the one thing they were trying to undo — so it closes the
+      // window. No tombstone: the post still exists in Discord, and a later
+      // edit that restores the text revives it.
       if (!doc) {
-        if (via === 'update') await this.expire(noticeIdFor(full.id as string), 'edited to nothing');
+        if (via === 'update') await this.expire(noticeIdFor(full.id as string), 'edited to nothing', false);
         return;
       }
 

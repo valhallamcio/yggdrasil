@@ -4,7 +4,7 @@ import type { Server as HttpServer } from 'node:http';
 import { config } from '../../config/index.js';
 import { eventBus } from '../../core/event-bus/index.js';
 import { logger } from '../../core/logger/index.js';
-import { AnnouncementsMirror, type MirrorMessage } from './announcements-mirror.js';
+import { AnnouncementsMirror, resolveMirrorDbName, type MirrorMessage } from './announcements-mirror.js';
 
 // discord.js is an optional dependency — install with: npm install discord.js
 // It is only imported when PLUGIN_DISCORD=true
@@ -148,12 +148,16 @@ export class DiscordPlugin implements Plugin {
     const channelId = config.ANNOUNCEMENTS_MIRROR_CHANNEL_ID;
     if (!config.ANNOUNCEMENTS_MIRROR_ENABLED || !channelId) return;
 
+    // The DB Bifrost's `notices` collection lives in, resolved the way
+    // Bifrost resolves its own: explicit override, then Bifrost's
+    // MONGODB_DATABASE, then Bifrost's code default.
+    const dbName = resolveMirrorDbName();
     const mirror = new AnnouncementsMirror({
       channelId,
       prefix: config.ANNOUNCEMENTS_MIRROR_PREFIX,
       weight: config.ANNOUNCEMENTS_MIRROR_WEIGHT,
       ttlDays: config.ANNOUNCEMENTS_MIRROR_TTL_DAYS,
-      dbName: config.ANNOUNCEMENTS_MIRROR_DB_NAME,
+      dbName,
     });
 
     /* eslint-disable @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access */
@@ -171,7 +175,7 @@ export class DiscordPlugin implements Plugin {
     });
     /* eslint-enable @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access */
 
-    logger.info({ plugin: this.name, channelId }, 'Announcements mirror enabled');
+    logger.info({ plugin: this.name, channelId, dbName }, 'Announcements mirror enabled');
   }
 
   /**

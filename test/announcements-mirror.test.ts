@@ -11,6 +11,7 @@ import {
   buildExpiry,
   buildNoticeDoc,
   noticeIdFor,
+  resolveMirrorDbName,
   sanitiseDiscordText,
   type MirrorMessage,
 } from '../src/plugins/discord/announcements-mirror.ts';
@@ -139,6 +140,10 @@ test('expiry: the delete update closes the window and leaves a tombstone', () =>
   // `enabled:false` is the tombstone a late create/edit checks against — without
   // it, a re-delivered gateway event republishes an announcement staff deleted.
   assert.equal(update.$set.enabled, false);
+  // An edit down to nothing closes the window WITHOUT the tombstone: the post
+  // still exists in Discord, and a restoring edit revives it.
+  const soft = buildExpiry(NOW, false) as { $set: Record<string, unknown> };
+  assert.deepEqual(Object.keys(soft.$set).sort(), ['expiresAt', 'updatedAt', 'updatedBy']);
 });
 
 // --- the runtime handlers ---------------------------------------------------
@@ -296,7 +301,13 @@ test('config: the mirror is off by default and needs nothing configured', () => 
   assert.equal(parsed.success && parsed.data.ANNOUNCEMENTS_MIRROR_ENABLED, false);
   assert.equal(parsed.success && parsed.data.ANNOUNCEMENTS_MIRROR_TTL_DAYS, 7);
   assert.equal(parsed.success && parsed.data.ANNOUNCEMENTS_MIRROR_WEIGHT, 1);
-  assert.equal(parsed.success && parsed.data.ANNOUNCEMENTS_MIRROR_DB_NAME, 'bifrost');
+  // The DB name is optional: the wiring resolves it (explicit override →
+  // Bifrost's MONGODB_DATABASE → 'valhallamc', Bifrost's own code default),
+  // so the two sides cannot silently disagree.
+  assert.equal(parsed.success && parsed.data.ANNOUNCEMENTS_MIRROR_DB_NAME, undefined);
+  assert.equal(resolveMirrorDbName({}), 'valhallamc');
+  assert.equal(resolveMirrorDbName({ MONGODB_DATABASE: 'bifrost' }), 'bifrost');
+  assert.equal(resolveMirrorDbName({ MONGODB_DATABASE: 'bifrost', ANNOUNCEMENTS_MIRROR_DB_NAME: 'named' }), 'named');
 });
 
 test('config: enabling the mirror requires the discord plugin and a channel', () => {
@@ -371,7 +382,7 @@ test('mirror: a create that lands after the delete does not resurrect the notice
   assert.equal((docs.get(id)?.expiresAt as Date).getTime() <= Date.now(), true, 'the window stays closed too');
 });
 
-test('mirror: an edit down to nothing expires the notice instead of leaving the old body up', async () => {
+test('mirror: an edit down to nothing closes the window, and a restore revives it', async () => {
   const { mirror, docs } = mirrorWith();
   await mirror.onCreate(message());
   const id = noticeIdFor('900000000000000001');
@@ -380,5 +391,43 @@ test('mirror: an edit down to nothing expires the notice instead of leaving the 
   // Somebody edits the text out of a live post (an image-only edit). Leaving
   // the previous body live until the TTL is the one thing they were undoing.
   await mirror.onUpdate(message({ content: '   🎉   ' }));
-  assert.equal(docs.get(id)?.enabled, false);
+  const emptied = docs.get(id)!;
+  assert.equal((emptied.expiresAt as Date).getTime() <= Date.now(), true, 'the window closed');
+  assert.equal(emptied.enabled, true, 'no tombstone: the post still exists in Discord');
+
+  // The edit that puts the text back revives it — Discord shows it live again.
+  await mirror.onUpdate(message({ content: 'Server is up' }));
+  const revived = docs.get(id)!;
+  assert.equal(revived.enabled, true);
+  assert.equal(((revived.body) as { en: string }).en.endsWith('Server is up'), true);
+  assert.equal((revived.expiresAt as Date).getTime(), POSTED.getTime() + 7 * DAY_MS, 'the window is the post\'s own');
+});
+
+test('mirror: a clear-then-restore edit pair lands in delivery order, never reversed', async () => {
+  const fake = fakeCollection();
+  // Every expire update is slow; the upserts are not.
+  const slowExpire = {
+    updateOne: (filter: Document, update: Document | Document[], options?: { upsert?: boolean }) => {
+      const base = fake.coll.updateOne(filter, update, options);
+      const isExpire = !Array.isArray(update) && options?.upsert !== true;
+      return isExpire
+        ? new Promise((resolve: (value: unknown) => void) => setTimeout(() => void base.then(resolve), 25))
+        : base;
+    },
+  } as unknown as Collection<Document>;
+  const mirror = new AnnouncementsMirror({ channelId: CHANNEL, dbName: 'bifrost', ...OPTS }, () => slowExpire);
+
+  const id = noticeIdFor('900000000000000001');
+  await mirror.onCreate(message());
+
+  // Staff edit A empties the text (slow soft expire), edit B restores it a
+  // moment later (fast upsert). Unserialized, B lands first and A's stale
+  // expire then kills the post Discord still shows as live.
+  void mirror.onUpdate(message({ content: '   🎉   ' }));
+  void mirror.onUpdate(message({ content: 'Server is up, actually' }));
+  await new Promise((resolve) => setTimeout(resolve, 90));
+
+  assert.equal(fake.docs.get(id)?.enabled, true, 'the restore edit decides, not the stale expire');
+  assert.equal(((fake.docs.get(id)?.body) as { en: string }).en.includes('actually'), true);
+  assert.equal((fake.docs.get(id)?.expiresAt as Date).getTime(), POSTED.getTime() + 7 * DAY_MS, 'the window is the post\'s own');
 });
