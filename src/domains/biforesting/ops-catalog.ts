@@ -23,6 +23,17 @@ export interface OpCatalogEntry {
   description: string;
 }
 
+/**
+ * A stack's tag for give_item/take_item: base64 of an uncompressed binary NBT compound. Binary NBT
+ * keeps every tag type exactly on every era, which SNBT does not (1.7.10's parser has no byte arrays).
+ * 256k chars is ~192 KB of NBT and stays well under the 1 MB request body limit.
+ */
+const itemNbt = z
+  .string()
+  .min(4)
+  .max(262_144)
+  .regex(/^[A-Za-z0-9+/]+={0,2}$/, 'nbt must be base64');
+
 export const OPS_CATALOG: Record<string, OpCatalogEntry> = {
   echo: {
     params: z.object({ message: z.string().min(1).max(4096) }).strict(),
@@ -77,11 +88,28 @@ export const OPS_CATALOG: Record<string, OpCatalogEntry> = {
         meta: z.number().int().min(0).max(65535).optional(),
         count: z.number().int().min(1).max(2304).optional(),
         overflow: z.enum(['drop', 'fail']).optional(),
+        nbt: itemNbt.optional(),
       })
       .strict(),
     serverGlobal: false,
     risk: 'reversible',
-    description: 'Give items to a player (NBT items: use run_command /give until phase 8). Queues for next login when offline.',
+    description:
+      "Give items to a player. `nbt` is the stack's tag as base64 binary NBT (from 1.20.5 the components compound). Queues for next login when offline.",
+  },
+  take_item: {
+    params: z
+      .object({
+        id: z.string().min(1).max(256),
+        meta: z.number().int().min(0).max(65535).optional(),
+        count: z.number().int().min(1).max(2304),
+        nbt: itemNbt.optional(),
+        num: z.number().int().min(0).max(2_147_483_647).optional(),
+      })
+      .strict(),
+    serverGlobal: false,
+    risk: 'reversible',
+    description:
+      "Take exactly `count` of one item from an ONLINE player's main inventory, all or nothing. A stack matches on registry id, damage, and a tag equal to `nbt` (no `nbt` = no tag). `num` also pins the numeric id this backend uses. Result `{player, requested, taken, removed}`; a shortfall fails with code `not_applied` and takes nothing.",
   },
   teleport: {
     params: z
