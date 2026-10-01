@@ -21,8 +21,14 @@
  *   dup       ack + result sent TWICE         → exercises store transition idempotency
  *   waiting   result status=waiting_player, then a presence join 2 s later; a re-dispatched
  *             op completes → exercises the waiting_player → presence → requeue path
+ *
+ * In ack-ok mode `profile_capture` behaves like the profiler: ack, a result with `captureId`
+ * after min(seconds, 2) s, then a signed PUT of a small report.json and trace.json.gz to the
+ * op's `uploadUrl`. `profile_stop` completes with `stopped: false`. `profile_fetch` PUTs a
+ * report.json and trace.json.gz for the requested captureId and lists the rest as missing.
+ * SEND_SPIKE=1 sends one `biforesting:spike` payload (a spike catcher dump report) at connect.
  */
-import { createHmac, pbkdf2Sync, randomBytes } from 'node:crypto';
+import { createHash, createHmac, pbkdf2Sync, randomBytes } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 import WebSocket from 'ws';
 
@@ -176,6 +182,22 @@ function onOp(chunk) {
     sendUnit(null, 'biforesting:op_res', jsonPayload({ opId: op.opId, phase: 'result', durationMs: 5, ...extra }));
   const completed = () => result({ status: 'completed', result: { echoed: op.params?.message ?? null } });
 
+  if (opMode === 'ack-ok' && op.type === 'profile_capture') {
+    ack();
+    void fakeCapture(op, result).catch((e) => console.error('[fake-mod] profile upload error:', e.message));
+    return;
+  }
+  if (opMode === 'ack-ok' && op.type === 'profile_fetch') {
+    ack();
+    void fakeFetch(op, result).catch((e) => console.error('[fake-mod] profile fetch error:', e.message));
+    return;
+  }
+  if (opMode === 'ack-ok' && op.type === 'profile_stop') {
+    ack();
+    result({ status: 'completed', result: { stopped: false, reason: 'no capture running' } });
+    return;
+  }
+
   switch (opMode) {
     case 'drop':
       break;
@@ -205,6 +227,131 @@ function onOp(chunk) {
   }
 }
 
+// ── profiler emulation ───────────────────────────────────────────────────────
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function fakeReport(captureId, level, sampler, seconds, spike = false) {
+  const hot = (id, kind, mod, className, ms, share, count, method) => ({
+    id: `${kind}/${id}`, name: id, kind, mod, className,
+    msPerTick: ms, msPerTickP50: ms * 0.9, msPerTickP95: ms * 1.4, selfMsTotal: ms * 40, inclMsTotal: ms * 42,
+    share, count, countPerTick: count / 40, costPerInstanceUs: (ms * 1000) / Math.max(1, count / 40),
+    topPositions: [{ dim: 'minecraft:overworld', x: 120, y: 64, z: -340, ms: ms * 30, count: 40 }],
+    samples: 20, topMethods: [{ frame: method, samples: 14, share: 0.7 }], spikeTicks: [],
+  });
+  const now = Date.now();
+  const spikeFields = spike
+    ? {
+        kind: 'spike',
+        trigger: {
+          tick: 200, tickMs: 812.4, thresholdMs: 250, at: new Date(now - 3000).toISOString(), preMs: 10000, postMs: 3000,
+          windowPreMs: 10000, windowPostMs: 3000, spikesInWindow: 1, suppressed: 0, suppressedMaxMs: 0, minIntervalMs: 300000,
+          messages: [{ atMs: 10001.5, text: 'GC G1 Young Generation (end of minor GC, G1 Evacuation Pause) 41 ms' }],
+        },
+      }
+    : {};
+  return {
+    schema: 1, captureId, ...spikeFields,
+    startedAt: new Date(now - seconds * 1000).toISOString(), stoppedAt: new Date(now).toISOString(),
+    durationMs: seconds * 1000, stopReason: 'maxSeconds', level: String(level).toUpperCase(), sampler,
+    maxSeconds: seconds, maxBytes: 67108864, truncated: false, tickCount: seconds * 20, analysisTicks: seconds * 20,
+    mspt: { p50: 21.4, p95: 38.2, p99: 61.0, max: 74.3, avg: 24.8 }, tps: 19.6,
+    server: { serverId, mcVersion: '1.7.10', loader: 'forge' },
+    jvm: { name: 'fake', version: '0', vendor: 'fake-mod', javaVersion: '8', gc: ['G1'], heapMaxMb: 8192 },
+    modList: [{ id: 'gregtech', version: '5.09', jar: 'gregtech.jar' }, { id: 'minecraft', version: '1.7.10' }],
+    events: { zones: 1000, counters: 0, messages: 0, droppedMessages: 0, bytes: 1024, tracks: 1 },
+    samples: { intervalMs: 10, total: 200, stacks: 5, overflow: 0, errors: 0 },
+    notes: ['fake-mod capture'],
+    hotspotsTotal: 3,
+    hotspots: [
+      hot('gregtech:multiblock', 'block_entity', 'gregtech', 'gregtech.api.metatileentity.BaseMetaTileEntity', 9.2, 0.37, 800, 'gregtech.api.util.GT_Recipe.findRecipe'),
+      hot('minecraft:zombie', 'entity', 'minecraft', 'net.minecraft.entity.monster.EntityZombie', 3.1, 0.12, 2400, 'net.minecraft.pathfinding.PathFinder.findPath'),
+      hot('minecraft:hopper', 'block_entity', 'minecraft', 'net.minecraft.tileentity.TileEntityHopper', 1.4, 0.06, 1200, 'net.minecraft.tileentity.TileEntityHopper.updateHopper'),
+    ],
+    worstTicks: [{ tick: 17, startMs: 850.2, ms: 74.3, zones: [{ id: 'block_entity/gregtech:multiblock', name: 'gregtech:multiblock', selfMs: 60.1 }] }],
+    mods: [
+      { mod: 'gregtech', msPerTick: 9.2, share: 0.37, selfMsTotal: 368, version: '5.09', jar: 'gregtech.jar' },
+      { mod: 'minecraft', msPerTick: 4.5, share: 0.18, selfMsTotal: 180, version: '1.7.10' },
+    ],
+    counters: {}, threads: [{ tid: 1, name: 'Server thread', zones: 1000, counters: 0 }],
+  };
+}
+
+function fakeTrace(seconds) {
+  const traceEvents = [{ name: 'thread_name', ph: 'M', pid: 1, tid: 1, args: { name: 'Server thread' } }];
+  for (let t = 0; t < seconds * 20; t++) {
+    const ts = t * 50_000;
+    traceEvents.push({ name: 'tick', ph: 'X', pid: 1, tid: 1, ts, dur: 24_000 });
+    traceEvents.push({ name: 'gregtech:multiblock', ph: 'X', pid: 1, tid: 1, ts: ts + 1_000, dur: 9_000 });
+  }
+  return gzipSync(Buffer.from(JSON.stringify({ traceEvents }), 'utf8'));
+}
+
+async function uploadArtifact(uploadUrl, token, captureId, artifact, body) {
+  const ts = Date.now();
+  const sha = createHash('sha256').update(body).digest('hex');
+  // serverId here is our own link serverId. Yggdrasil puts the same value in uploadUrl.
+  const sig = createHmac('sha256', KEY).update(`${serverId}\n${captureId}\n${artifact}\n${sha}\n${ts}`, 'utf8').digest('hex');
+  const res = await fetch(`${uploadUrl}${encodeURIComponent(captureId)}/${artifact}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/octet-stream',
+      'X-Bf-Upload-Token': token,
+      'X-Bf-Timestamp': String(ts),
+      'X-Bf-Content-Sha256': sha,
+      'X-Bf-Signature': sig,
+    },
+    body,
+  });
+  return `${res.status} ${(await res.text()).slice(0, 200)}`;
+}
+
+async function fakeCapture(op, result) {
+  const { seconds = 30, level = 'l1', sampler = 'java', uploadToken, uploadUrl } = op.params ?? {};
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
+  const captureId = `fake-${stamp}-${randomBytes(2).toString('hex')}`;
+  await sleep(Math.min(seconds, 2) * 1000);
+  result({ status: 'completed', result: { captureId, level, sampler, seconds, artifacts: ['report.json', 'trace.json.gz'] } });
+  if (!uploadToken || !uploadUrl) {
+    console.log('[fake-mod] profile_capture carried no upload grant, nothing to upload');
+    return;
+  }
+  const artifacts = [
+    ['report.json', Buffer.from(JSON.stringify(fakeReport(captureId, level, sampler, seconds)), 'utf8')],
+    ['trace.json.gz', fakeTrace(Math.min(seconds, 10))],
+  ];
+  for (const [artifact, body] of artifacts) {
+    console.log(`[fake-mod] PUT ${captureId}/${artifact} (${body.length}B): ${await uploadArtifact(uploadUrl, uploadToken, captureId, artifact, body)}`);
+  }
+}
+
+async function fakeFetch(op, result) {
+  const { captureId, artifacts, uploadToken, uploadUrl } = op.params ?? {};
+  const wanted = artifacts ?? ['report.json', 'report.md', 'trace.json.gz', 'samples.collapsed', 'samples.jfr'];
+  const have = {
+    'report.json': () => Buffer.from(JSON.stringify(fakeReport(captureId, 'l0', 'none', 13, true)), 'utf8'),
+    'trace.json.gz': () => fakeTrace(13),
+  };
+  const uploaded = [];
+  const alreadyStored = [];
+  const uploadErrors = [];
+  const missing = wanted.filter((a) => !have[a]);
+  for (const a of wanted.filter((x) => have[x])) {
+    const status = await uploadArtifact(uploadUrl, uploadToken, captureId, a, have[a]());
+    console.log(`[fake-mod] fetch PUT ${captureId}/${a}: ${status}`);
+    if (status.startsWith('201')) uploaded.push(a);
+    else if (status.startsWith('409')) alreadyStored.push(a);
+    else uploadErrors.push(`${a}: HTTP ${status}`);
+  }
+  result({ status: 'completed', result: { captureId, uploaded, missing, alreadyStored, uploadErrors } });
+}
+
+/** `[varint 1][varint gzLen][gz report.json]`, mirrors the mod's SpikePayloads. */
+function spikePayload() {
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
+  const gz = gzipSync(Buffer.from(JSON.stringify(fakeReport(`spike-${serverId}-${stamp}`, 'l0', 'none', 13, true)), 'utf8'));
+  return Buffer.concat([vint(1), vint(gz.length), gz]);
+}
+
 function onOpen(sock) {
   console.log(`[fake-mod] connected (ws) to ${host}:${port} as serverId="${serverId}"${process.env.BAD_KEY ? ' (BAD_KEY — expect rejection)' : ''}`);
   sendUnit(sock, 'biforesting:hello', Buffer.from(serverId, 'utf8'));
@@ -232,6 +379,7 @@ function onOpen(sock) {
     const gz = Buffer.from([31, 139, 8, 0, 1, 2, 3, 4]);
     sendUnit(sock, 'biforesting:invsnap', Buffer.concat([vint(1), header, vint(gz.length), gz]));
   }
+  if (process.env.SEND_SPIKE) sendUnit(sock, 'biforesting:spike', spikePayload());
   if (process.env.SEND_QUESTREG) {
     // [ver=1][varint gzLen][gz utf8-json] — mirrors shared QuestRegistryPayloads (phase 6)
     const gz = gzipSync(Buffer.from(JSON.stringify({

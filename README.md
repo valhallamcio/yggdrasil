@@ -56,6 +56,7 @@ Create a `.env` file in the project root. Required variables are marked with **b
 | `BIFORESTING_LINK_HOST` | `0.0.0.0` | Bind host for the link listener |
 | `BIFORESTING_PSK` | — | Shared PSK (same value the mod was built with); derives the HMAC authKey. Required when the plugin is enabled (unless `BIFORESTING_AUTHKEY_HEX` is set) |
 | `BIFORESTING_AUTHKEY_HEX` | — | Pre-derived 64-hex authKey, overrides the PSK derivation |
+| `BIFORESTING_PUBLIC_URL` | `https://api.valhallamc.dev` | Base URL in the `uploadUrl` of `profile_capture` ops. Servers PUT profiler artifacts there |
 | `DISCORD_TOKEN` | — | Discord bot token |
 | `DISCORD_CLIENT_ID` | — | Discord application client ID |
 | `DISCORD_GUILD_ID` | — | Discord server/guild ID |

@@ -124,6 +124,15 @@ export class OpsStore {
     return this.col().find(q).sort({ _id: -1 }).limit(limit).toArray();
   }
 
+  /** Newest op of a type on an instance, created at or after `since`, in one of `states`. */
+  async latestOfType(instanceKey: string, type: string, since: Date, states: OpState[]): Promise<OpDoc | null> {
+    return this.col()
+      .find({ instanceKey, type, state: { $in: states }, createdAt: { $gte: since } })
+      .sort({ _id: -1 })
+      .limit(1)
+      .next();
+  }
+
   // ── Guarded transitions (single-doc CAS + audit) ───────────────────────────
 
   private async transition(

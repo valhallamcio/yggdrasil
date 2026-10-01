@@ -189,13 +189,18 @@ export function decodeRegister(payload: Buffer): RegisterInfo {
  *   [varint ver=2][byte accepted(1/0)][utf canonicalServerId][utf friendlyName]
  *   [varint enabledFeatures][varint metricsHz][varint questHz][varint chunkHz][int64 serverTimeMillis]
  *   [varint negotiatedVersion]
+ *   + optional [varint fixCount][utf fixId]*fixCount (enabledFixes)
  *
  * `accepted` is a plain 0/1 wire byte (NOT a varint). `serverTimeMillis` is written
  * as a big-endian int64. Always writes v2: feat-era (v1) mods reject a v2 ack and stay
  * unregistered — fine, none are deployed and they never enforced the policy anyway.
+ *
+ * The enabledFixes tail rides v2 with no version bump. Older mod decoders reject a version
+ * above 2. They ignore trailing bytes. An empty list writes no tail, so the bytes match the old
+ * layout. The mod reads a missing tail as "no fixes".
  */
 export function encodeRegAck(ack: RegAck): Buffer {
-  return new Writer()
+  const w = new Writer()
     .varInt(2)
     .byte(ack.accepted ? 1 : 0)
     .utf(ack.canonicalServerId)
@@ -205,8 +210,13 @@ export function encodeRegAck(ack: RegAck): Buffer {
     .varInt(ack.questHz)
     .varInt(ack.chunkHz)
     .long(BigInt(ack.serverTimeMillis))
-    .varInt(ack.negotiatedVersion)
-    .build();
+    .varInt(ack.negotiatedVersion);
+  const fixes = ack.enabledFixes ?? [];
+  if (fixes.length > 0) {
+    w.varInt(fixes.length);
+    for (const id of fixes) w.utf(id);
+  }
+  return w.build();
 }
 
 

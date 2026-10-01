@@ -145,6 +145,8 @@ export interface RegAck {
   serverTimeMillis: number;
   /** min(mod's linkProtocolVersion, ours). */
   negotiatedVersion: number;
+  /** Fix ids the mod's runtime switch turns on. Omitted or empty = every fix off. */
+  enabledFixes?: string[];
 }
 
 // ── Resolved identity of a connected backend ─────────────────────────────────
@@ -187,6 +189,8 @@ export interface OpFlags {
   /** How to handle an offline target: queue for login (default), offline-edit in-JVM, or reject. */
   offlineMode?: 'queue' | 'offline-edit' | 'reject';
   dryRun?: boolean;
+  /** Caller confirmed a dangerous or out-of-budget op (requiresConfirm types, tier C profile captures). */
+  confirm?: boolean;
   /** Compound PARENT op (e.g. account_reset) — never wire-dispatched; children carry the work. */
   compound?: boolean;
 }

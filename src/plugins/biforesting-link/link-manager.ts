@@ -8,6 +8,8 @@ import { saveQuestRegistry } from './quest-registry-store.js';
 import { saveMetrics } from './metrics-history.js';
 import { saveQuests, saveChunks } from './persistence.js';
 import { saveItemRegistry } from './item-registry-store.js';
+import { decodeSpike } from './profile-spike.js';
+import { storeSpikeReport } from './profile-store.js';
 import { getPolicy, ZERO_POLICY } from './policy-store.js';
 import { serverResolver } from './server-resolver.js';
 import type { LinkIdentity, LinkMetrics, LinkSnapshot, LinkSessionSnapshot, OpResMsg, PresenceMsg, RegisterInfo } from './types.js';
@@ -23,6 +25,7 @@ const OP_RES = 'biforesting:op_res';
 const PRESENCE = 'biforesting:presence';
 const INVSNAP = 'biforesting:invsnap';
 const QUESTREG = 'biforesting:questreg';
+const SPIKE = 'biforesting:spike';
 
 /**
  * Where op_res/presence messages and link-up notifications go (the op dispatcher). Wired by the
@@ -212,6 +215,9 @@ class BiforestingLinkManager {
           });
         }
         break;
+      case SPIKE:
+        if (s.identity?.resolved) await this.onSpike(s.identity, payload);
+        break;
       case CHUNKS:
         await this.onChunks(s, payload);
         break;
@@ -228,6 +234,25 @@ class BiforestingLinkManager {
       default:
         logger.debug({ sessionId: s.sessionId, channel, bytes: payload.length }, 'biforesting-link: unknown channel');
     }
+  }
+
+  /** `biforesting:spike`: a spike catcher dump's report, stored as a `kind: 'spike'` report doc. */
+  private async onSpike(identity: LinkIdentity, payload: Buffer): Promise<void> {
+    const doc = await storeSpikeReport({
+      serverId: identity.linkServerId,
+      instanceKey: identity.instanceKey,
+      report: decodeSpike(payload),
+    });
+    logger.info(
+      {
+        instanceKey: identity.instanceKey,
+        captureId: doc.captureId,
+        tickMs: doc.trigger?.['tickMs'] ?? null,
+        thresholdMs: doc.trigger?.['thresholdMs'] ?? null,
+        bytes: payload.length,
+      },
+      'biforesting-link: spike report stored',
+    );
   }
 
   private async onHello(s: Session, linkServerId: string): Promise<void> {
@@ -355,6 +380,7 @@ class BiforestingLinkManager {
       chunkHz: policy.chunkHz,
       serverTimeMillis: Date.now(),
       negotiatedVersion,
+      enabledFixes: policy.enabledFixes,
     });
     return this.sendDownToSession(s, REG_ACK, ack);
   }

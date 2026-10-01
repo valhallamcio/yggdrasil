@@ -1,8 +1,10 @@
 import { eventBus } from '../../core/event-bus/index.js';
 import { logger } from '../../core/logger/index.js';
 import { encodeJsonPayload, encodeJsonPayloadWithBlob } from './decoders.js';
+import { catalogEntry } from '../../domains/biforesting/ops-catalog.js';
 import { getSnapshot } from './inv-store.js';
 import { getPolicy, FEATURE_BITS } from './policy-store.js';
+import { issueUploadGrant, profileUploadUrl, UPLOAD_GRACE_MS } from './profile-store.js';
 import type { OpsStore } from './ops-store.js';
 import type { OpDoc, OpResMsg, PresenceMsg } from './types.js';
 
@@ -15,6 +17,8 @@ export interface OpSendPort {
   sendDown(instanceKey: string, channel: string, payload: Buffer): boolean;
   /** instanceKeys of all live, identity-resolved sessions (for the sweep). */
   liveInstanceKeys(): string[];
+  /** The serverId the live session registered with. Profile upload URLs carry it. */
+  linkServerIdFor?(instanceKey: string): string | null;
 }
 
 /**
@@ -88,7 +92,16 @@ export class OpDispatcher {
   private async dispatchOne(op: OpDoc): Promise<boolean> {
     // Gate BEFORE the pending→dispatched CAS: with the ops bit off the op must stay `pending`
     // untouched (not burn attempts in a dispatch/timeout loop).
-    if (!(await this.opsEnabled(op.instanceKey))) return false;
+    const policy = await getPolicy(op.instanceKey);
+    if ((policy.enabledFeatures & CAP_OPS) === 0) return false;
+    // A per-type feature bit is a kill switch for that op type. A revoked bit fails the op, so a
+    // later grant does not fire a stale request.
+    const feature = catalogEntry(op.type)?.requiresFeature;
+    if (feature && (policy.enabledFeatures & (FEATURE_BITS[feature] ?? 0)) === 0) {
+      const failed = await this.store.markFailed(op._id, `feature '${feature}' is not granted for ${op.instanceKey}`);
+      if (failed) this.emitUpdated(failed);
+      return false;
+    }
     const dispatched = await this.store.markDispatched(op._id);
     if (!dispatched) return false; // raced by cancel/expiry/another dispatch
     this.emitUpdated(dispatched);
@@ -102,6 +115,10 @@ export class OpDispatcher {
       if (!hydrated) return false; // already marked failed with the reason
       params = hydrated.params;
       blob = hydrated.blob;
+    } else if (dispatched.type === 'profile_capture' || dispatched.type === 'profile_fetch') {
+      const hydrated = await this.hydrateProfileUpload(dispatched);
+      if (!hydrated) return false; // already marked failed with the reason
+      params = hydrated;
     }
 
     const wire = JSON.stringify({
@@ -158,6 +175,32 @@ export class OpDispatcher {
       },
       blob: Buffer.from(snap.gz.buffer),
     };
+  }
+
+  /**
+   * Adds the artifact upload grant to a `profile_capture` or `profile_fetch` dispatch. The token
+   * stays out of the stored op, so GET /ops never shows it. It expires 30 min after the op's result
+   * deadline. A fetch token is bound to the requested captureId from the start.
+   */
+  private async hydrateProfileUpload(op: OpDoc): Promise<Record<string, unknown> | null> {
+    const serverId = this.port.linkServerIdFor?.(op.instanceKey) ?? op.instanceKey;
+    const deadline = Date.now() + op.dispatchTimeoutMs + op.execTimeoutMs;
+    const fetchId = op.type === 'profile_fetch' ? op.params['captureId'] : undefined;
+    try {
+      const grant = await issueUploadGrant({
+        opId: op._id,
+        instanceKey: op.instanceKey,
+        serverId,
+        expiresAt: new Date(deadline + UPLOAD_GRACE_MS),
+        ...(typeof fetchId === 'string' ? { captureId: fetchId } : {}),
+      });
+      return { ...op.params, uploadToken: grant.token, uploadUrl: profileUploadUrl(serverId) };
+    } catch (err) {
+      logger.warn({ err, opId: op._id }, 'biforesting-ops: profile upload grant failed');
+      const failed = await this.store.markFailed(op._id, 'could not issue the profile upload token');
+      if (failed) this.emitUpdated(failed);
+      return null;
+    }
   }
 
   /** Called by the link manager when a resolved backend registers (link-up). */

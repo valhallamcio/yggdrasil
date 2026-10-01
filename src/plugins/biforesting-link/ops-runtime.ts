@@ -15,6 +15,7 @@ export const opsStore = new OpsStore(() => getDb());
 export const opDispatcher = new OpDispatcher(opsStore, {
   sendDown: (instanceKey, channel, payload) => biforestingLinkManager.sendDown(instanceKey, channel, payload),
   liveInstanceKeys: () => biforestingLinkManager.liveInstanceKeys(),
+  linkServerIdFor: (instanceKey): string | null => biforestingLinkManager.getSessionByServer(instanceKey)?.identity?.linkServerId ?? null,
 });
 
 export const compoundOps = new CompoundOps(opsStore, opDispatcher);

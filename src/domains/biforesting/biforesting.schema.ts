@@ -1,4 +1,7 @@
 import { z } from 'zod';
+import { profileCaptureParams } from './ops-catalog.js';
+import { CAPTURE_ID_RE, PROFILE_ARTIFACT_NAMES, PROFILE_KINDS } from '../../plugins/biforesting-link/profile-upload.js';
+import { FIX_ID_RE, MAX_ENABLED_FIXES, MAX_FIX_ID_LENGTH } from '../../plugins/biforesting-link/policy-store.js';
 
 /** A server identifier in the URL: link serverId, Pterodactyl serverId, tag, or instanceKey (`tag:id`). */
 export const linkServerParamsSchema = z.object({
@@ -151,10 +154,46 @@ export const policyPutBodySchema = z
     metricsHz: z.number().int().min(0).max(20).optional(),
     questHz: z.number().int().min(0).max(20).optional(),
     chunkHz: z.number().int().min(0).max(20).optional(),
+    /** Fix ids the mod's runtime switch turns on. Replaces the stored list; `[]` turns every fix off. */
+    enabledFixes: z
+      .array(z.string().max(MAX_FIX_ID_LENGTH).regex(FIX_ID_RE, 'fix id must be lowercase modid-short-name'))
+      .max(MAX_ENABLED_FIXES)
+      .optional(),
   })
   .refine((b) => (b.features !== undefined) !== (b.enabledFeatures !== undefined) || (b.features === undefined && b.enabledFeatures === undefined), {
     message: 'provide features[] OR enabledFeatures, not both',
   });
+
+// ── Profiler (profiler plan phase 4) ─────────────────────────────────────────
+
+/** POST /:server/profiles. `confirm` becomes `flags.confirm` and lifts the tier B budget. */
+export const profileCaptureBodySchema = profileCaptureParams.extend({ confirm: z.boolean().optional() }).strict();
+
+export const profileParamsSchema = z.object({
+  server: z.string().min(1).max(64),
+  captureId: z.string().regex(CAPTURE_ID_RE, 'captureId must match [A-Za-z0-9._-]{1,128}'),
+});
+
+export const profileArtifactParamsSchema = profileParamsSchema.extend({
+  artifact: z.enum(PROFILE_ARTIFACT_NAMES),
+});
+
+/** `kind=spike` lists spike catcher dumps only, `kind=capture` everything else. */
+export const profileListQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+  kind: z.enum(PROFILE_KINDS).optional(),
+});
+
+export const fleetHotspotsQuerySchema = z.object({
+  top: z.coerce.number().int().min(1).max(500).default(50),
+  kind: z.string().min(1).max(64).optional(),
+  mod: z.string().min(1).max(128).optional(),
+});
+
+/** `t` is a short-lived view token from POST .../perfetto-link. */
+export const profileViewQuerySchema = z.object({
+  t: z.string().min(1).max(2048).optional(),
+});
 
 export type LinkServerParams = z.infer<typeof linkServerParamsSchema>;
 export type PolicyPutBody = z.infer<typeof policyPutBodySchema>;
@@ -172,3 +211,9 @@ export type PackParams = z.infer<typeof packParamsSchema>;
 export type PackIconParams = z.infer<typeof packIconParamsSchema>;
 export type PackLangBody = z.infer<typeof packLangBodySchema>;
 export type IconsUploadBody = z.infer<typeof iconsUploadBodySchema>;
+export type ProfileCaptureBody = z.infer<typeof profileCaptureBodySchema>;
+export type ProfileParams = z.infer<typeof profileParamsSchema>;
+export type ProfileArtifactParams = z.infer<typeof profileArtifactParamsSchema>;
+export type ProfileListQuery = z.infer<typeof profileListQuerySchema>;
+export type FleetHotspotsQuery = z.infer<typeof fleetHotspotsQuerySchema>;
+export type ProfileViewQuery = z.infer<typeof profileViewQuerySchema>;

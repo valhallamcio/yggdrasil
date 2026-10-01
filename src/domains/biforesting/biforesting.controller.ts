@@ -1,7 +1,7 @@
 import type { Request, Response } from 'express';
 import { biforestingLinkManager } from '../../plugins/biforesting-link/link-manager.js';
 import { encodeQuestDown, encodeChunksDown } from '../../plugins/biforesting-link/decoders.js';
-import { getPolicy, setPolicy, maskForFeatures, featureNamesForMask } from '../../plugins/biforesting-link/policy-store.js';
+import { getPolicy, setPolicy, maskForFeatures, featureNamesForMask, normalizeFixIds } from '../../plugins/biforesting-link/policy-store.js';
 import { opDispatcher, opsStore, compoundOps } from '../../plugins/biforesting-link/ops-runtime.js';
 import { COMPOUND_TYPES } from '../../plugins/biforesting-link/compound-ops.js';
 import { latestSnapshot, listSnapshots, getSnapshot } from '../../plugins/biforesting-link/inv-store.js';
@@ -14,6 +14,8 @@ import { serverResolver } from '../../plugins/biforesting-link/server-resolver.j
 import { NotFoundError, ValidationError } from '../../shared/errors/index.js';
 import { catalogEntry, dryRunConfirmError, OPS_CATALOG } from './ops-catalog.js';
 import { settlePreApplySnapshot } from './settle-snapshot.js';
+import { assertFeatureGranted, assertProfileBudget } from './profiles.controller.js';
+import { PROFILE_FETCH_EXEC_TIMEOUT_MS, profileCaptureExecTimeoutMs } from './profile-budget.js';
 import type { LinkServerParams, PolicyPutBody, QuestDownBody, ChunksDownBody, OpCreateBody, OpIdParams, OpListQuery, MetricsHistoryQuery, PlayerInvParams, SnapshotIdParams, QuestSearchQuery, ItemSearchQuery, PackParams, PackIconParams, PackLangBody, IconsUploadBody } from './biforesting.schema.js';
 
 const QUEST_CHANNEL = 'biforesting:quest';
@@ -291,12 +293,19 @@ export class BiforestingController {
       throw new ValidationError(`Unknown server '${server}' — policy must target a resolvable server`);
     }
 
-    const fields: { enabledFeatures?: number; metricsHz?: number; questHz?: number; chunkHz?: number } = {};
+    const fields: {
+      enabledFeatures?: number;
+      metricsHz?: number;
+      questHz?: number;
+      chunkHz?: number;
+      enabledFixes?: string[];
+    } = {};
     if (body.features !== undefined) fields.enabledFeatures = maskForFeatures(body.features);
     if (body.enabledFeatures !== undefined) fields.enabledFeatures = body.enabledFeatures;
     if (body.metricsHz !== undefined) fields.metricsHz = body.metricsHz;
     if (body.questHz !== undefined) fields.questHz = body.questHz;
     if (body.chunkHz !== undefined) fields.chunkHz = body.chunkHz;
+    if (body.enabledFixes !== undefined) fields.enabledFixes = normalizeFixIds(body.enabledFixes);
     if (Object.keys(fields).length === 0) throw new ValidationError('No policy fields to update');
 
     const actor = (req.headers['x-actor'] as string | undefined) ?? 'api';
@@ -310,6 +319,7 @@ export class BiforestingController {
         metricsHz: doc.metricsHz,
         questHz: doc.questHz,
         chunkHz: doc.chunkHz,
+        enabledFixes: doc.enabledFixes ?? [],
         reAcked,
       },
     });
@@ -350,6 +360,19 @@ export class BiforestingController {
       throw new ValidationError(
         `'${body.type}' is a ${entry.risk} op — pass flags.confirm: true to create it (after your own confirmation step)`,
       );
+    }
+
+    if (entry.requiresFeature) {
+      await assertFeatureGranted(identity.instanceKey, entry.requiresFeature, server);
+    }
+    // Profiler captures: the tier B budget holds here too, so this path is no bypass.
+    let execTimeoutMs = body.execTimeoutMs;
+    if (body.type === 'profile_capture') {
+      const capture = parsed.data as { seconds: number; level: string };
+      await assertProfileBudget(identity.instanceKey, capture, body.flags?.confirm === true);
+      execTimeoutMs ??= profileCaptureExecTimeoutMs(capture.seconds);
+    } else if (body.type === 'profile_fetch') {
+      execTimeoutMs ??= PROFILE_FETCH_EXEC_TIMEOUT_MS;
     }
 
     // Destructive-apply guard (phase 5): a non-dry-run of a requiresDryRunConfirm type must
@@ -405,7 +428,7 @@ export class BiforestingController {
       ...(body.expiresInMs !== undefined ? { expiresInMs: body.expiresInMs } : {}),
       ...(body.maxAttempts !== undefined ? { maxAttempts: body.maxAttempts } : {}),
       ...(body.dispatchTimeoutMs !== undefined ? { dispatchTimeoutMs: body.dispatchTimeoutMs } : {}),
-      ...(body.execTimeoutMs !== undefined ? { execTimeoutMs: body.execTimeoutMs } : {}),
+      ...(execTimeoutMs !== undefined ? { execTimeoutMs } : {}),
       createdBy,
     });
 
@@ -472,6 +495,7 @@ export class BiforestingController {
         type,
         serverGlobal: e.serverGlobal,
         risk: e.risk,
+        ...(e.requiresFeature ? { requiresFeature: e.requiresFeature } : {}),
         description: e.description,
       })),
     });

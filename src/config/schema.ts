@@ -36,6 +36,8 @@ export const configSchema = z.object({
 
   BIFORESTING_PSK: z.string().optional(),
   BIFORESTING_AUTHKEY_HEX: z.string().optional(),
+  // Public base URL that linked servers reach Yggdrasil on. Profile captures upload artifacts here.
+  BIFORESTING_PUBLIC_URL: z.string().url().default('https://api.valhallamc.dev'),
 
   DISCORD_TOKEN: z.string().optional(),
   DISCORD_CLIENT_ID: z.string().optional(),

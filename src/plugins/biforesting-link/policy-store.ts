@@ -17,6 +17,8 @@ export interface LinkPolicyDoc {
   metricsHz: number;
   questHz: number;
   chunkHz: number;
+  /** Fix ids the mod's runtime switch turns on. Sent as the reg_ack `enabledFixes` tail. */
+  enabledFixes: string[];
   updatedAt?: Date;
   updatedBy?: string;
 }
@@ -26,7 +28,22 @@ export const ZERO_POLICY: Omit<LinkPolicyDoc, 'instanceKey'> = {
   metricsHz: 0,
   questHz: 0,
   chunkHz: 0,
+  enabledFixes: [],
 };
+
+/**
+ * Fix id format: lowercase `modid-short-name`. MUST mirror the mod's shared `FixDef.ID`
+ * (bifrost-lib `shared/fixes/FixDef.java`).
+ */
+export const FIX_ID_RE = /^[a-z0-9_]+(-[a-z0-9_]+)+$/;
+export const MAX_FIX_ID_LENGTH = 64;
+/** Cap of the policy list. The mod rejects a reg_ack with more (`RegisterCodec.MAX_FIXES`). */
+export const MAX_ENABLED_FIXES = 256;
+
+/** Dedupes in first-seen order. Callers validate the format first (the PUT schema does). */
+export function normalizeFixIds(ids: readonly string[]): string[] {
+  return [...new Set(ids)];
+}
 
 /**
  * Feature name → capability bit. MUST mirror the mod's shared
@@ -46,6 +63,9 @@ export const FEATURE_BITS: Record<string, number> = {
   offline_edit: 0x4000,
   quest_ops: 0x8000,
   team_ops: 0x10000,
+  profiler: 0x20000,
+  // Reserved for the spike catcher (profiler plan phase 6). Nothing reads it yet.
+  spike_catcher: 0x40000,
 };
 
 export function maskForFeatures(names: string[]): number {
@@ -98,6 +118,7 @@ export async function getPolicy(instanceKey: string): Promise<Omit<LinkPolicyDoc
       metricsHz: doc.metricsHz ?? 0,
       questHz: doc.questHz ?? 0,
       chunkHz: doc.chunkHz ?? 0,
+      enabledFixes: doc.enabledFixes ?? [],
     };
   } catch (err) {
     logger.warn({ err, instanceKey }, 'biforesting-link: policy lookup failed — using ZERO policy');

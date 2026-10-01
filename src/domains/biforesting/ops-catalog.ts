@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { CAPTURE_ID_RE, PROFILE_ARTIFACT_NAMES } from '../../plugins/biforesting-link/profile-upload.js';
 
 /**
  * Catalog of op types the REST API accepts — each entry validates `params` and declares dispatch
@@ -20,6 +21,11 @@ export interface OpCatalogEntry {
   requiresConfirm?: boolean;
   /** A fresh inspect_inventory snapshot is auto-prepended before a directly-created apply. */
   autoSnapshot?: boolean;
+  /**
+   * Policy feature (a `FEATURE_BITS` name) the server must have. Create is refused without it,
+   * and the dispatcher fails a pending op of this type when the bit is gone at dispatch time.
+   */
+  requiresFeature?: string;
   description: string;
 }
 
@@ -33,6 +39,33 @@ const itemNbt = z
   .min(4)
   .max(262_144)
   .regex(/^[A-Za-z0-9+/]+={0,2}$/, 'nbt must be base64');
+
+export const PROFILE_LEVELS = ['l0', 'l1', 'l2'] as const;
+export const PROFILE_SAMPLERS = ['none', 'java', 'jfr'] as const;
+
+/**
+ * profile_fetch params: a capture already on the server's disk (a spike dump, a command capture, a
+ * capture whose upload failed). No artifacts means every artifact that exists. Yggdrasil adds
+ * `uploadToken` (bound to this captureId) and `uploadUrl` at dispatch.
+ */
+export const profileFetchParams = z
+  .object({
+    captureId: z
+      .string()
+      .regex(CAPTURE_ID_RE, 'captureId must match [A-Za-z0-9._-]{1,128}')
+      .refine((v) => v !== '.' && v !== '..', 'captureId must name a capture directory'),
+    artifacts: z.array(z.enum(PROFILE_ARTIFACT_NAMES)).min(1).max(PROFILE_ARTIFACT_NAMES.length).optional(),
+  })
+  .strict();
+
+/** profile_capture params. Yggdrasil adds `uploadToken` and `uploadUrl` at dispatch. */
+export const profileCaptureParams = z
+  .object({
+    seconds: z.number().int().min(1).max(600).default(30),
+    level: z.enum(PROFILE_LEVELS).default('l1'),
+    sampler: z.enum(PROFILE_SAMPLERS).default('java'),
+  })
+  .strict();
 
 export const OPS_CATALOG: Record<string, OpCatalogEntry> = {
   echo: {
@@ -203,6 +236,29 @@ export const OPS_CATALOG: Record<string, OpCatalogEntry> = {
     risk: 'dangerous',
     description:
       'Put a player back exactly as a snapshot had them — slot-exact, armor in armor slots, full NBT. mode=replace (default) overwrites the inventory; mode=fill only touches slots that are now empty; slots[] restricts it to specific slots (ender = 100+i). The gz blob is attached at dispatch; a pre-restore snapshot is auto-taken so it can be undone.',
+  },
+  profile_capture: {
+    params: profileCaptureParams,
+    serverGlobal: true,
+    risk: 'safe',
+    requiresFeature: 'profiler',
+    description:
+      'Record a profiler capture and upload its artifacts to /v1/biforesting/:server/profiles. Tier B (level l0/l1, at most 60 s, 1 per server per 30 min) runs without confirm. Anything else needs flags.confirm: true.',
+  },
+  profile_stop: {
+    params: z.object({}).strict(),
+    serverGlobal: true,
+    risk: 'safe',
+    requiresFeature: 'profiler',
+    description: 'Stop the running profiler capture early. The mod still writes and uploads its artifacts.',
+  },
+  profile_fetch: {
+    params: profileFetchParams,
+    serverGlobal: true,
+    risk: 'safe',
+    requiresFeature: 'profiler',
+    description:
+      'Upload the artifacts of a capture that is already on the server (spike dumps, command captures, failed uploads) to /v1/biforesting/:server/profiles. The result lists uploaded, missing, alreadyStored and uploadErrors.',
   },
   account_reset: {
     requiresConfirm: true,

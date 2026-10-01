@@ -6,6 +6,7 @@ import { ensureIndexes } from './persistence.js';
 import { ensureInvIndexes } from './inv-store.js';
 import { ensureMetricsIndexes, startDownsampleSweep } from './metrics-history.js';
 import { opDispatcher, opsStore } from './ops-runtime.js';
+import { ensureProfileIndexes, startProfileCleanup } from './profile-store.js';
 
 /**
  * Biforesting play-phase link runtime: durable-ops boot (boot-reset + recovery sweep), metrics
@@ -20,6 +21,7 @@ import { opDispatcher, opsStore } from './ops-runtime.js';
 export class BiforestingLinkPlugin implements Plugin {
   readonly name = 'biforesting-link';
   private stopDownsample: (() => void) | null = null;
+  private stopProfileCleanup: (() => void) | null = null;
 
   async init(): Promise<void> {
     getAuthKey(); // fail fast if the PSK/authKey is missing or malformed
@@ -27,6 +29,7 @@ export class BiforestingLinkPlugin implements Plugin {
     await opsStore.ensureIndexes();
     await ensureMetricsIndexes();
     await ensureInvIndexes();
+    await ensureProfileIndexes();
 
     // Durable ops: boot-reset stranded `dispatched` ops, start the recovery sweep, and route
     // op_res/presence/link-up through the dispatcher.
@@ -35,6 +38,9 @@ export class BiforestingLinkPlugin implements Plugin {
 
     // Metrics history (D13): hourly downsample of biforesting_metrics, swept every few minutes.
     this.stopDownsample = startDownsampleSweep();
+
+    // Profiler captures: hourly 30-day retention over the GridFS bucket and the report docs.
+    this.stopProfileCleanup = startProfileCleanup();
 
     // "listening" now means: the link runtime is up and the WS route will accept sessions.
     biforestingLinkManager.listening = true;
@@ -45,6 +51,10 @@ export class BiforestingLinkPlugin implements Plugin {
     if (this.stopDownsample) {
       this.stopDownsample();
       this.stopDownsample = null;
+    }
+    if (this.stopProfileCleanup) {
+      this.stopProfileCleanup();
+      this.stopProfileCleanup = null;
     }
     opDispatcher.stop();
     biforestingLinkManager.setOpSink(null);

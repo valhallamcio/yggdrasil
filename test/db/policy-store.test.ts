@@ -57,3 +57,35 @@ test('policy-store: db failure fails CLOSED to the ZERO policy', async () => {
     setPolicyDbProvider(() => mongo.client.db('ygg_policy_test'));
   }
 });
+
+test('policy-store: enabledFixes defaults to [] and round-trips', async () => {
+  assert.deepEqual((await getPolicy('never-seen-fixes')).enabledFixes, []);
+
+  await setPolicy('packf', { enabledFeatures: 0x410 }, 'a');
+  assert.deepEqual((await getPolicy('packf')).enabledFixes, [], 'insert seeds the empty list');
+
+  await setPolicy('packf', { enabledFixes: ['biforesting-canary', 'gregtech-recipe-cache'] }, 'b');
+  const read = await getPolicy('packf');
+  assert.deepEqual(read.enabledFixes, ['biforesting-canary', 'gregtech-recipe-cache']);
+  assert.equal(read.enabledFeatures, 0x410, 'a fixes-only update keeps the feature bits');
+
+  await setPolicy('packf', { metricsHz: 2 }, 'c');
+  assert.deepEqual((await getPolicy('packf')).enabledFixes, ['biforesting-canary', 'gregtech-recipe-cache'],
+    'a cadence-only update keeps the fixes');
+
+  await setPolicy('packf', { enabledFixes: [] }, 'd');
+  assert.deepEqual((await getPolicy('packf')).enabledFixes, [], 'an empty list turns every fix off');
+});
+
+test('policy-store: a doc stored before enabledFixes existed reads as no fixes', async () => {
+  await mongo.client.db('ygg_policy_test').collection('biforesting_policies').insertOne({
+    instanceKey: 'pre-fixes',
+    enabledFeatures: 0x10,
+    metricsHz: 0,
+    questHz: 0,
+    chunkHz: 0,
+  });
+  const read = await getPolicy('pre-fixes');
+  assert.deepEqual(read.enabledFixes, []);
+  assert.equal(read.enabledFeatures, 0x10);
+});
