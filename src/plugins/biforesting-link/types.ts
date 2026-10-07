@@ -38,6 +38,49 @@ export interface DimMetrics {
   loadedChunks: number;
 }
 
+/** One enclosing listener of the ledger block: its own time and the share its units cover. */
+export interface LedgerEnclosing {
+  name: string;
+  ms: number;
+  coverage?: number;
+}
+
+/** One owner row of the ledger block. The mod sends the top 10 by ms plus one `(other)` row. */
+export interface LedgerOwner {
+  name: string;
+  ms: number;
+  maxDivisor?: number;
+}
+
+/** Tick budget v2 state of the ledger window. */
+export interface LedgerBudget {
+  mode?: string;
+  msptEma?: number;
+  machineMs?: number;
+  budgetMs?: number;
+  capMs?: number;
+  throttledUnits?: number;
+  throttledOwners?: number;
+  savingMs?: number;
+}
+
+/**
+ * The `ledger` block of a metrics payload (v1, bifrost-lib `docs/invariants/cost-ledger.md`).
+ * At most one payload per 15 s carries it. Units are ms per tick, means over the ledger window.
+ * The decoder keeps only well-typed fields, so each scalar can be absent.
+ */
+export interface LedgerMetrics {
+  v?: number;
+  windowTicks?: number;
+  tickMs?: number;
+  coverage?: number;
+  /** Source metric name (`be_chunk`, `ae2_service`, ...) to ms. */
+  sources: Record<string, number>;
+  enclosing: LedgerEnclosing[];
+  owners: LedgerOwner[];
+  budget?: LedgerBudget;
+}
+
 export interface LinkMetrics {
   mspt: number;
   tps: number;
@@ -51,6 +94,8 @@ export interface LinkMetrics {
   msptMax?: number;
   perDim?: DimMetrics[];
   censusAgeMs?: number;
+  /** Cost ledger block. Absent on most payloads (the mod sends it at most every 15 s). */
+  ledger?: LedgerMetrics;
 }
 
 export interface RegistryEntry {

@@ -1,6 +1,6 @@
 import { gunzipSync } from 'node:zlib';
 import { Reader, Writer } from './frame-codec.js';
-import type { LinkMetrics, RegistryPayload, QuestTeam, ChunkTeam, RegisterInfo, RegAck, OpResMsg, PresenceMsg, InvSnapHeader, QuestRegPayload, QuestRegRow, ItemRegPayload, ItemRegRow, ItemVariant } from './types.js';
+import type { LinkMetrics, LedgerMetrics, LedgerBudget, RegistryPayload, QuestTeam, ChunkTeam, RegisterInfo, RegAck, OpResMsg, PresenceMsg, InvSnapHeader, QuestRegPayload, QuestRegRow, ItemRegPayload, ItemRegRow, ItemVariant } from './types.js';
 
 /**
  * Payload decoders/encoders for the four link channels. Field order mirrors
@@ -24,10 +24,12 @@ export function decodeMetrics(payload: Buffer): LinkMetrics {
       heapMax: number;
       perDim: LinkMetrics['perDim'];
       censusAgeMs: number;
+      ledger?: unknown;
     };
     const perDim = Array.isArray(o.perDim) ? o.perDim : [];
     let loadedChunks = 0;
     for (const d of perDim) loadedChunks += d.loadedChunks || 0;
+    const ledger = decodeLedger(o.ledger);
     return {
       mspt: o.msptAvg,
       tps: o.tps,
@@ -40,6 +42,7 @@ export function decodeMetrics(payload: Buffer): LinkMetrics {
       msptMax: o.msptMax,
       perDim,
       censusAgeMs: o.censusAgeMs,
+      ...(ledger ? { ledger } : {}),
     };
   }
   const mspt = r.float();
@@ -50,6 +53,69 @@ export function decodeMetrics(payload: Buffer): LinkMetrics {
   const heapUsed = Number(r.long());
   const heapMax = Number(r.long());
   return { mspt, tps, players, levels, loadedChunks, heapUsed, heapMax };
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/** JSON can say 1e999, which parses to Infinity, so a plain typeof check is not enough. */
+function finite(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+}
+
+/** The finite number fields `keys` of `src`. Absent or bad fields stay out (no undefined keys for Mongo). */
+function pickNumbers<K extends string>(src: Record<string, unknown>, keys: readonly K[]): Partial<Record<K, number>> {
+  const out: Partial<Record<K, number>> = {};
+  for (const k of keys) {
+    const n = finite(src[k]);
+    if (n !== undefined) out[k] = n;
+  }
+  return out;
+}
+
+/** Rows with a string name and a finite ms. Other rows are dropped. */
+function ledgerRows(v: unknown): Array<Record<string, unknown> & { name: string; ms: number }> {
+  if (!Array.isArray(v)) return [];
+  return v.filter(
+    (r): r is Record<string, unknown> & { name: string; ms: number } =>
+      isRecord(r) && typeof r['name'] === 'string' && finite(r['ms']) !== undefined,
+  );
+}
+
+/** A source key Mongo or JS treat in a special way ('$x', dotted paths, `__proto__`) is dropped. */
+function plainKey(k: string): boolean {
+  return k.length > 0 && !k.startsWith('$') && !k.includes('.') && k !== '__proto__';
+}
+
+/**
+ * The metrics `ledger` block (v1). Keeps only well-typed fields and rows, never throws.
+ * Returns undefined when the block is absent or not an object.
+ */
+export function decodeLedger(raw: unknown): LedgerMetrics | undefined {
+  if (!isRecord(raw)) return undefined;
+  const sources: Record<string, number> = {};
+  if (isRecord(raw['sources'])) {
+    for (const [k, v] of Object.entries(raw['sources'])) {
+      const n = finite(v);
+      if (n !== undefined && plainKey(k)) sources[k] = n;
+    }
+  }
+  const out: LedgerMetrics = {
+    ...pickNumbers(raw, ['v', 'windowTicks', 'tickMs', 'coverage'] as const),
+    sources,
+    enclosing: ledgerRows(raw['enclosing']).map((r) => ({ name: r.name, ms: r.ms, ...pickNumbers(r, ['coverage'] as const) })),
+    owners: ledgerRows(raw['owners']).map((r) => ({ name: r.name, ms: r.ms, ...pickNumbers(r, ['maxDivisor'] as const) })),
+  };
+  const b = raw['budget'];
+  if (isRecord(b)) {
+    const budget: LedgerBudget = pickNumbers(b, [
+      'msptEma', 'machineMs', 'budgetMs', 'capMs', 'throttledUnits', 'throttledOwners', 'savingMs',
+    ] as const);
+    if (typeof b['mode'] === 'string' && b['mode']) budget.mode = b['mode'];
+    out.budget = budget;
+  }
+  return out;
 }
 
 export function decodeRegistry(payload: Buffer): RegistryPayload {
