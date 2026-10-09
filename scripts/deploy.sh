@@ -29,7 +29,7 @@ fi
 [ -f "$SRC/dist/main.js" ] || { echo "no dist/main.js — build failed"; exit 1; }
 
 step "1. backup the live build (rollback point)"
-ssh "$HOST" "cd '$VOL' && tar czf 'rollback-$TS.tar.gz' dist package.json package-lock.json && ls -lh 'rollback-$TS.tar.gz'"
+ssh -n "$HOST" "cd '$VOL' && tar czf 'rollback-$TS.tar.gz' dist package.json package-lock.json && ls -lh 'rollback-$TS.tar.gz'"
 
 step "2. ship dist + manifests"
 rsync -az --delete "$SRC/dist/" "$HOST:$VOL/dist/"
@@ -38,7 +38,7 @@ rsync -az "$SRC/package.json" "$SRC/package-lock.json" "$HOST:$VOL/"
 step "3. deps (only when the lockfile moved)"
 # Park node_modules by rename first: instant, and a failed install is one mv to undo. The running
 # process keeps its open inodes, so it survives until the restart.
-ssh "$HOST" "set -e; cd '$VOL'
+ssh -n "$HOST" "set -e; cd '$VOL'
   if [ -n \"\$(diff <(tar xzOf 'rollback-$TS.tar.gz' package-lock.json) package-lock.json || true)\" ]; then
     mv node_modules 'node_modules-bak-$TS'
     if docker exec -u $CUID -w /home/container '$UUID' npm ci --omit=dev --no-audit --no-fund; then
@@ -51,11 +51,11 @@ ssh "$HOST" "set -e; cd '$VOL'
   fi"
 
 step "4. env check — the link REFUSES to boot without PLUGIN_WEBSOCKET=true"
-ssh "$HOST" "grep -E '^(PLUGIN_WEBSOCKET|PLUGIN_BIFORESTING_LINK)=' '$VOL/.env' || true"
+ssh -n "$HOST" "grep -E '^(PLUGIN_WEBSOCKET|PLUGIN_BIFORESTING_LINK)=' '$VOL/.env' || true"
 read -rp "  restart now? [y/N] " a; [ "$a" = y ] || { echo "aborted before restart"; exit 1; }
 
 step "5. restart"
-ssh "$HOST" "docker restart '$UUID' > /dev/null && echo restarted"
+ssh -n "$HOST" "docker restart '$UUID' > /dev/null && echo restarted"
 
 step "6. verify"
 sleep 10
