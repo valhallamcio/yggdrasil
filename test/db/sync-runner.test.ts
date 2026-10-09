@@ -1111,6 +1111,18 @@ test('cooldown: a new move after a committed one is refused with the minutes lef
   await current.cancelMove('evol', u, next, 'test');
 });
 
+test('cooldown: a staff move with skipCooldown starts inside the cooldown', async () => {
+  const u = newUuid();
+  await seed(u, A, 0);
+  const { id } = await toApply(u);
+  await answer(await lastOp(u, 'sync_apply'), 'completed', { applied: true, v: 1 });
+  assert.equal((await moveOf(id)).outcome, 'committed');
+  await rejectsWith(start(u, B, A), 'cooldown');
+  const view = await current.startMove('evol', u, { from: B, to: A, skipCooldown: true, actor: 'test' });
+  assert.equal((await moveOf(view.id)).step, 'prepare');
+  await current.cancelMove('evol', u, view.id, 'test');
+});
+
 test('refusals: mode, frozen, membership, owner, link, feature and fingerprint', async () => {
   const u = newUuid();
   await seed(u, A, 0);

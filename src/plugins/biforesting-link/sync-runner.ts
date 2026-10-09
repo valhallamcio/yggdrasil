@@ -436,6 +436,8 @@ export interface MoveStartInput {
   to: string;
   name?: string | undefined;
   reason?: string | undefined;
+  /** Staff move: the group cooldown does not apply. */
+  skipCooldown?: boolean | undefined;
   actor: string;
 }
 
@@ -637,7 +639,7 @@ export class SyncRunner implements SyncLiveHooks {
       throw new SyncConflictError('not_owner', message, { owner: doc?.owner ?? null });
     }
 
-    const last = await moves.latestCommitted(group, uuid);
+    const last = input.skipCooldown ? null : await moves.latestCommitted(group, uuid);
     if (last?.endedAt) {
       const left = last.endedAt.getTime() + g.cooldownMs - this.now();
       if (left > 0) {

@@ -52,6 +52,8 @@ export const syncMoveStartBodySchema = z
     to: serverId,
     name: z.string().min(1).max(64).optional(),
     reason: z.string().max(200).optional(),
+    /** The caller (Bifrost) checked staff rights. The move ignores the group cooldown. */
+    skipCooldown: z.boolean().optional(),
   })
   .strict()
   .refine((b) => b.from !== b.to, { message: 'from and to must be different instances' });
