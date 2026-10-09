@@ -28,6 +28,7 @@ import {
   profileViewQuerySchema,
 } from './biforesting.schema.js';
 import { asyncHandler } from '../../shared/utils/async-handler.js';
+import { syncRouter } from './sync.router.js';
 
 // Handlers are synchronous (no I/O) — Express 4 forwards synchronous throws to the error
 // handler, so they're bound directly without asyncHandler.
@@ -35,6 +36,10 @@ const controller = new BiforestingController();
 const profiles = new ProfilesController();
 
 export const biforestingRouter = Router();
+
+// ── Player sync (literal /sync mount before /:server) ────────────────────────
+
+biforestingRouter.use('/sync', syncRouter);
 
 // ── Link observability (literal /link routes before /:server) ────────────────
 

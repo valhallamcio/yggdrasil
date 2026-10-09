@@ -39,7 +39,10 @@ export type AppEvent =
   | { type: 'biforesting.op.updated'; payload: { opId: string; instanceKey: string; serverTag: string | null; type: string; state: string; attempts: number; result: unknown; parentOpId: string | null; updatedAt: Date } }
   | { type: 'biforesting.presence'; payload: { instanceKey: string; event: 'join' | 'quit' | 'snapshot'; player: { uuid: string; name: string } | null; online: Array<{ uuid: string; name: string }> | null } }
   | { type: 'biforesting.inv.snapshot'; payload: { instanceKey: string; uuid: string; name: string; reason: string; sizeBytes: number } }
-  | { type: 'biforesting.questreg.updated'; payload: { instanceKey: string; source: string; count: number } };
+  | { type: 'biforesting.questreg.updated'; payload: { instanceKey: string; source: string; count: number } }
+  | { type: 'biforesting.sync.snapshot'; payload: { snapshotId: string; group: string; serverId: string; instanceKey: string; duplicate: boolean; kind: string; uuid: string; name: string; v: number; moveId: string | null; fp: string | null; dv: number | null; sha256: string; gzLen: number; rawLen: number | null; blocked: unknown[]; links: unknown[]; worldData: unknown[]; playerData: string[]; tookMs: number | null; at: number | null } }
+  | { type: 'biforesting.sync.move'; payload: { moveId: string; group: string; uuid: string; name: string; kind: string; from: string | null; to: string; vFrom: number; vTo: number; step: string; outcome: string | null; code: string | null; at: Date } }
+  | { type: 'biforesting.sync.reseed'; payload: { group: string; serverId: string; actor: string; movesAborted: string[]; movesStuck: string[]; trusted: number; disownsQueued: number; disownBatches: number; ownBatches: number; lockBatches: number; at: Date } };
 
 export type AppEventType = AppEvent['type'];
 export type AppEventPayload<T extends AppEventType> = Extract<AppEvent, { type: T }>['payload'];

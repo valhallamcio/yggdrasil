@@ -7,6 +7,7 @@ import { ensureInvIndexes } from './inv-store.js';
 import { ensureMetricsIndexes, startDownsampleSweep } from './metrics-history.js';
 import { opDispatcher, opsStore } from './ops-runtime.js';
 import { ensureProfileIndexes, startProfileCleanup } from './profile-store.js';
+import { ensureSyncIndexes, startSyncRunner, stopSyncRunner, syncService } from './sync-runtime.js';
 
 /**
  * Biforesting play-phase link runtime: durable-ops boot (boot-reset + recovery sweep), metrics
@@ -30,11 +31,17 @@ export class BiforestingLinkPlugin implements Plugin {
     await ensureMetricsIndexes();
     await ensureInvIndexes();
     await ensureProfileIndexes();
+    await ensureSyncIndexes();
 
     // Durable ops: boot-reset stranded `dispatched` ops, start the recovery sweep, and route
     // op_res/presence/link-up through the dispatcher.
     biforestingLinkManager.setOpSink(opDispatcher);
     await opDispatcher.start();
+
+    // Player sync: presence feeds the ledger, syncsnap feeds the snapshot store, and the move
+    // runner (S2/S3) works on live groups only. Each group stays inert until its mode leaves `off`.
+    biforestingLinkManager.setSyncSink(syncService);
+    startSyncRunner();
 
     // Metrics history (D13): hourly downsample of biforesting_metrics, swept every few minutes.
     this.stopDownsample = startDownsampleSweep();
@@ -47,7 +54,7 @@ export class BiforestingLinkPlugin implements Plugin {
     logger.info('biforesting-link: runtime up (transport = /biforesting/ WS on the main port)');
   }
 
-  async shutdown(): Promise<void> {
+  shutdown(): Promise<void> {
     if (this.stopDownsample) {
       this.stopDownsample();
       this.stopDownsample = null;
@@ -57,9 +64,12 @@ export class BiforestingLinkPlugin implements Plugin {
       this.stopProfileCleanup = null;
     }
     opDispatcher.stop();
+    stopSyncRunner();
     biforestingLinkManager.setOpSink(null);
+    biforestingLinkManager.setSyncSink(null);
     biforestingLinkManager.listening = false;
     biforestingLinkManager.closeAll();
     logger.info({ plugin: this.name }, 'biforesting-link: runtime stopped');
+    return Promise.resolve();
   }
 }

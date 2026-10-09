@@ -66,6 +66,10 @@ export const FEATURE_BITS: Record<string, number> = {
   profiler: 0x20000,
   // Reserved for the spike catcher (profiler plan phase 6). Nothing reads it yet.
   spike_catcher: 0x40000,
+  // Player sync (bifrost-lib docs/invariants/player-sync.md). Only the 26.1.2 tree advertises it.
+  player_sync: 0x80000,
+  // Reserved for the shutdown guard. Nothing reads it yet.
+  shutdown_guard: 0x100000,
 };
 
 export function maskForFeatures(names: string[]): number {

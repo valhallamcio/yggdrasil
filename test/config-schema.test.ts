@@ -53,3 +53,14 @@ test('config: websocket on without the link stays valid (ws-only deployments)', 
   const r = parse({ PLUGIN_WEBSOCKET: 'true', PLUGIN_BIFORESTING_LINK: 'false' });
   assert.equal(r.success, true);
 });
+
+test('config: the sync rate limit defaults to 3000 per 15 min and is configurable', () => {
+  const d = parse({});
+  assert.equal(d.success && d.data.SYNC_RATE_LIMIT_MAX, 3000);
+  assert.equal(d.success && d.data.SYNC_RATE_LIMIT_WINDOW_MS, 900_000);
+  assert.equal(d.success && d.data.RATE_LIMIT_MAX, 100, 'the global limit keeps its default');
+
+  const set = parse({ SYNC_RATE_LIMIT_MAX: '50', SYNC_RATE_LIMIT_WINDOW_MS: '60000' });
+  assert.equal(set.success && set.data.SYNC_RATE_LIMIT_MAX, 50);
+  assert.equal(set.success && set.data.SYNC_RATE_LIMIT_WINDOW_MS, 60_000);
+});

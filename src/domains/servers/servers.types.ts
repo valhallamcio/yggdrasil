@@ -30,6 +30,10 @@ export interface ServerDocument {
   isForge: boolean;
   mods: unknown[];
   tags: string[];
+  /** Bifrost instance group (player sync). Absent on ungrouped servers. */
+  group?: string;
+  /** Bifrost instance number within the group (1, 2, ...). */
+  instanceNumber?: number;
 }
 
 export interface ShardDocument {
@@ -101,6 +105,10 @@ export interface ServerDto {
   newestFileID?: number;
   requiresUpdate?: boolean;
   modpackID: number;
+  /** Bifrost instance group, '' when ungrouped. */
+  group: string;
+  /** Instance number within the group, 0 when unset. */
+  instanceNumber: number;
 }
 
 export interface ServerWithStatsDto extends ServerDto {

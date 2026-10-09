@@ -1,6 +1,8 @@
+import { createHash } from 'node:crypto';
 import { gunzipSync } from 'node:zlib';
 import { Reader, Writer } from './frame-codec.js';
 import type { LinkMetrics, LedgerMetrics, LedgerBudget, RegistryPayload, QuestTeam, ChunkTeam, RegisterInfo, RegAck, OpResMsg, PresenceMsg, InvSnapHeader, QuestRegPayload, QuestRegRow, ItemRegPayload, ItemRegRow, ItemVariant } from './types.js';
+import type { DecodedSyncSnap, RegisterSync, SyncBlockedEntry, SyncLinkEntry, SyncSnapHeader, SyncSnapKind, SyncWorldDataEntry } from './types.js';
 
 /**
  * Payload decoders/encoders for the four link channels. Field order mirrors
@@ -234,8 +236,11 @@ export function decodeChunks(payload: Buffer): ChunkTeam[] {
  *
  * `bootNonce` is read as a BigInt (it may exceed JS safe-int range) and kept as a
  * string — never coerced to Number.
+ *
+ * v2 can carry an optional `[utf syncJson]` tail (player-sync spec 3.2). An unusable tail never
+ * fails the register: `sync` stays absent and `onBadSyncTail` gets the reason.
  */
-export function decodeRegister(payload: Buffer): RegisterInfo {
+export function decodeRegister(payload: Buffer, onBadSyncTail?: (reason: string) => void): RegisterInfo {
   const r = new Reader(payload);
   const ver = r.varInt(); // message-format version: 1 (feat-era) or 2 (+linkProtocolVersion)
   const serverId = r.utf();
@@ -245,7 +250,33 @@ export function decodeRegister(payload: Buffer): RegisterInfo {
   const gameAddr = r.utf();
   const bootNonce = r.long().toString();
   const linkProtocolVersion = ver >= 2 ? r.varInt() : 1;
-  return { serverId, friendlyHint, capabilities, node, gameAddr, bootNonce, linkProtocolVersion };
+  const info: RegisterInfo = { serverId, friendlyHint, capabilities, node, gameAddr, bootNonce, linkProtocolVersion };
+  if (ver >= 2 && r.remaining() > 0) {
+    const sync = readRegisterSync(r);
+    if (typeof sync === 'string') onBadSyncTail?.(sync);
+    else info.sync = sync;
+  }
+  return info;
+}
+
+/** The register sync tail, or the reason it is unusable. Bytes after the tail are ignored. */
+function readRegisterSync(r: Reader): RegisterSync | string {
+  let raw: unknown;
+  try {
+    const len = r.varInt();
+    raw = JSON.parse(r.bytes(len).toString('utf8'));
+  } catch (err) {
+    return `unreadable sync tail: ${(err as Error).message}`;
+  }
+  if (!isRecord(raw)) return 'sync tail is not a JSON object';
+  const fp = raw['fp'];
+  const cfg = raw['cfg'];
+  const dv = finite(raw['dv']);
+  const mods = finite(raw['mods']);
+  const items = finite(raw['items']);
+  if (typeof fp !== 'string' || fp.length === 0 || typeof cfg !== 'string') return 'sync tail needs string fp and cfg';
+  if (dv === undefined || mods === undefined || items === undefined) return 'sync tail needs numeric dv, mods and items';
+  return { fp, dv, mods, items, cfg };
 }
 
 // ── DOWN encoders (authoritative pushes) ─────────────────────────────────────
@@ -357,6 +388,94 @@ export function decodeInvSnap(payload: Buffer): { header: InvSnapHeader; gz: Buf
     },
     gz,
   };
+}
+
+/** Cap of one syncsnap gz blob. The mod's own cap (`maxBlobBytes`) defaults to 2 MiB. */
+export const SYNCSNAP_MAX_GZ_BYTES = 8 * 1024 * 1024;
+
+const SYNC_SNAP_KINDS: readonly SyncSnapKind[] = ['shadow', 'release', 'pre_sync'];
+
+export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * `biforesting:syncsnap` (player-sync spec 3.4): [varint ver=1][utf header json][varint gzLen][gz].
+ * The gz blob stays opaque: Node checks its length and sha256, never its NBT. Throws on a bad
+ * field, so the caller logs and drops the message.
+ */
+export function decodeSyncSnap(payload: Buffer): DecodedSyncSnap {
+  const r = new Reader(payload);
+  const version = r.varInt();
+  if (version !== 1) throw new Error(`unsupported syncsnap version ${version}`);
+  const raw: unknown = JSON.parse(r.utf());
+  if (!isRecord(raw)) throw new Error('malformed syncsnap header');
+  const kind = raw['kind'];
+  if (typeof kind !== 'string' || !SYNC_SNAP_KINDS.includes(kind as SyncSnapKind)) {
+    throw new Error(`syncsnap kind ${String(kind)} is unknown`);
+  }
+  const uuid = raw['uuid'];
+  if (typeof uuid !== 'string' || !UUID_RE.test(uuid)) throw new Error('syncsnap uuid is missing or malformed');
+  const v = raw['v'];
+  if (typeof v !== 'number' || !Number.isSafeInteger(v) || v < 0) throw new Error('syncsnap v is not a version number');
+  const sha256 = raw['sha256'];
+  if (typeof sha256 !== 'string' || !/^[0-9a-f]{64}$/i.test(sha256)) throw new Error('syncsnap sha256 is missing');
+
+  const gzLen = r.varInt();
+  if (gzLen < 0 || gzLen > SYNCSNAP_MAX_GZ_BYTES) {
+    throw new Error(`syncsnap gzLen ${gzLen} is outside 0..${SYNCSNAP_MAX_GZ_BYTES}`);
+  }
+  if (gzLen !== r.remaining()) throw new Error(`syncsnap gzLen ${gzLen} != ${r.remaining()} bytes present`);
+  const headerGzLen = raw['gzLen'];
+  if (headerGzLen !== undefined && headerGzLen !== gzLen) {
+    throw new Error(`syncsnap header gzLen ${String(headerGzLen)} != wire gzLen ${gzLen}`);
+  }
+  const gz = r.bytes(gzLen);
+  if (createHash('sha256').update(gz).digest('hex') !== sha256.toLowerCase()) {
+    throw new Error('syncsnap sha256 does not match the gz bytes');
+  }
+
+  const header: SyncSnapHeader = {
+    kind: kind as SyncSnapKind,
+    uuid: uuid.toLowerCase(),
+    name: typeof raw['name'] === 'string' ? raw['name'] : '',
+    v,
+    sha256: sha256.toLowerCase(),
+    gzLen,
+    blocked: records(raw['blocked']).map(
+      (e): SyncBlockedEntry => ({
+        where: text(e['where']),
+        slot: text(e['slot']),
+        id: text(e['id']),
+        reason: text(e['reason']) || 'block',
+        ...(typeof e['detail'] === 'string' ? { detail: e['detail'] } : {}),
+      }),
+    ),
+    links: records(raw['links']).map(
+      (e): SyncLinkEntry => ({ where: text(e['where']), slot: text(e['slot']), id: text(e['id']), component: text(e['component']) }),
+    ),
+    worldData: records(raw['worldData']).map(
+      (e): SyncWorldDataEntry => ({ h: text(e['h']), key: text(e['key']), ...pickNumbers(e, ['rawLen'] as const) }),
+    ),
+    playerData: Array.isArray(raw['playerData']) ? raw['playerData'].filter((p): p is string => typeof p === 'string') : [],
+    ...pickNumbers(raw, ['dv', 'rawLen', 'tookMs', 'at'] as const),
+  };
+  for (const k of ['group', 'moveId', 'fp'] as const) {
+    const s = raw[k];
+    if (typeof s === 'string' && s.length > 0) header[k] = s;
+  }
+  return { header, gz };
+}
+
+/**
+ * The entries of a header list. A non-object entry becomes an empty record, so a malformed
+ * `blocked` entry still counts as blocked.
+ */
+function records(v: unknown): Array<Record<string, unknown>> {
+  return Array.isArray(v) ? v.map((e) => (isRecord(e) ? e : {})) : [];
+}
+
+/** A string or number field as text. The mod may send a slot index as a number. */
+function text(v: unknown): string {
+  return typeof v === 'string' ? v : typeof v === 'number' && Number.isFinite(v) ? String(v) : '';
 }
 
 /**

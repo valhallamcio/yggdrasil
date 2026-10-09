@@ -313,6 +313,14 @@ export class OpsStore {
     return this.transition(opId, PRE_ACK_STATES, 'expired', { completedAt: new Date() }, 'expiresAt passed');
   }
 
+  /** Ops of one type on an instance that may still reach the backend or answer. */
+  async listOpen(instanceKey: string, type: string): Promise<OpDoc[]> {
+    return this.col()
+      .find({ instanceKey, type, state: { $in: [...PRE_ACK_STATES, 'acked'] } })
+      .sort({ _id: 1 })
+      .toArray();
+  }
+
   /** waiting_player ops for a player who just joined (matched by uuid or name, case-insensitive). */
   async findWaitingForPlayer(instanceKey: string, uuid: string, name: string): Promise<OpDoc[]> {
     const ops = await this.col().find({ instanceKey, state: 'waiting_player' }).toArray();

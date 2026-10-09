@@ -34,6 +34,8 @@ function toServerDto(doc: WithId<ServerDocument>): ServerDto {
     newestFileID: doc.newestFileID,
     requiresUpdate: doc.requiresUpdate,
     modpackID: doc.modpackID,
+    group: typeof doc.group === 'string' ? doc.group : '',
+    instanceNumber: typeof doc.instanceNumber === 'number' && Number.isFinite(doc.instanceNumber) ? doc.instanceNumber : 0,
   };
 }
 

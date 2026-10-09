@@ -29,6 +29,9 @@ export const configSchema = z.object({
 
   RATE_LIMIT_WINDOW_MS: numberFromString('900000'),
   RATE_LIMIT_MAX: numberFromString('100'),
+  // /v1/biforesting/sync skips the per-IP limit above. Bifrost login holds poll it, so it counts per API key.
+  SYNC_RATE_LIMIT_WINDOW_MS: numberFromString('900000'),
+  SYNC_RATE_LIMIT_MAX: numberFromString('3000'),
 
   PLUGIN_DISCORD: booleanFromString.default('false'),
   PLUGIN_WEBSOCKET: booleanFromString.default('false'),

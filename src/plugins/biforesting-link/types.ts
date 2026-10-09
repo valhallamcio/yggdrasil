@@ -176,6 +176,78 @@ export interface RegisterInfo {
    * (decoded via `Reader.long()` → BigInt → `.toString()`); never coerced to Number.
    */
   bootNonce: string;
+  /** Player sync fingerprint from the optional register tail. Absent = the mod does not sync. */
+  sync?: RegisterSync;
+}
+
+// ── Player sync (bifrost-lib docs/invariants/player-sync.md) ─────────────────
+
+/** The `[utf syncJson]` register tail (player-sync spec 3.2). */
+export interface RegisterSync {
+  fp: string;
+  dv: number;
+  mods: number;
+  items: number;
+  cfg: string;
+}
+
+/** The sync stamp `{g, v, m}` of a player `.dat` (spec 3.3). */
+export interface SyncStamp {
+  g: string;
+  v: number;
+  m?: string;
+}
+
+export type SyncSnapKind = 'shadow' | 'release' | 'pre_sync';
+
+export interface SyncBlockedEntry {
+  where: string;
+  slot: string;
+  id: string;
+  reason: string;
+  detail?: string;
+}
+
+export interface SyncLinkEntry {
+  where: string;
+  slot: string;
+  id: string;
+  component: string;
+}
+
+export interface SyncWorldDataEntry {
+  h: string;
+  key: string;
+  rawLen?: number;
+}
+
+/** Decoded `biforesting:syncsnap` header (spec 3.4). The decoder keeps only well-typed fields. */
+export interface SyncSnapHeader {
+  kind: SyncSnapKind;
+  /** Lowercase. */
+  uuid: string;
+  name: string;
+  /** From the op params. Absent on shadow snapshots. */
+  group?: string;
+  v: number;
+  moveId?: string;
+  fp?: string;
+  dv?: number;
+  /** Lowercase hex of the gz bytes. */
+  sha256: string;
+  gzLen: number;
+  rawLen?: number;
+  blocked: SyncBlockedEntry[];
+  links: SyncLinkEntry[];
+  worldData: SyncWorldDataEntry[];
+  playerData: string[];
+  tookMs?: number;
+  at?: number;
+}
+
+export interface DecodedSyncSnap {
+  header: SyncSnapHeader;
+  gz: Buffer;
 }
 
 /** `biforesting:reg_ack` payload (Ygg → mod, DOWN the same link). */
@@ -301,11 +373,19 @@ export interface OpResMsg {
   journalReplay?: boolean;
 }
 
+/** One player of a presence message. */
+export interface PresencePlayer {
+  uuid: string;
+  name: string;
+  /** The player's sync stamp on join and snapshot entries (player-sync spec 3.3). Never on quit. */
+  sync?: SyncStamp;
+}
+
 /** Decoded `biforesting:presence` (UP): join/quit events + full snapshot on link-up. */
 export interface PresenceMsg {
   event: 'join' | 'quit' | 'snapshot';
-  player: { uuid: string; name: string } | null;
-  online: Array<{ uuid: string; name: string }> | null;
+  player: PresencePlayer | null;
+  online: PresencePlayer[] | null;
 }
 
 // ── Session snapshot (observability) ─────────────────────────────────────────

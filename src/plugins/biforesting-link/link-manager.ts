@@ -2,7 +2,7 @@ import { eventBus } from '../../core/event-bus/index.js';
 import { logger } from '../../core/logger/index.js';
 import { getAuthKey } from './auth-key.js';
 import { encodeFrames, encodeOuterUnit } from './frame-codec.js';
-import { decodeMetrics, decodeItemRegistry, decodeQuest, decodeChunks, decodeRegister, decodeOpRes, decodePresence, decodeInvSnap, decodeQuestReg, encodeRegAck } from './decoders.js';
+import { decodeMetrics, decodeItemRegistry, decodeQuest, decodeChunks, decodeRegister, decodeOpRes, decodePresence, decodeInvSnap, decodeQuestReg, decodeSyncSnap, encodeRegAck } from './decoders.js';
 import { saveInvSnapshot } from './inv-store.js';
 import { saveQuestRegistry } from './quest-registry-store.js';
 import { saveMetrics } from './metrics-history.js';
@@ -12,7 +12,7 @@ import { decodeSpike } from './profile-spike.js';
 import { storeSpikeReport } from './profile-store.js';
 import { getPolicy, ZERO_POLICY } from './policy-store.js';
 import { serverResolver } from './server-resolver.js';
-import type { LinkIdentity, LinkMetrics, LinkSnapshot, LinkSessionSnapshot, OpResMsg, PresenceMsg, RegisterInfo } from './types.js';
+import type { DecodedSyncSnap, LinkIdentity, LinkMetrics, LinkSnapshot, LinkSessionSnapshot, OpResMsg, PresenceMsg, RegisterInfo, RegisterSync } from './types.js';
 
 const HELLO = 'biforesting:hello';
 const REGISTER = 'biforesting:register';
@@ -26,6 +26,7 @@ const PRESENCE = 'biforesting:presence';
 const INVSNAP = 'biforesting:invsnap';
 const QUESTREG = 'biforesting:questreg';
 const SPIKE = 'biforesting:spike';
+const SYNCSNAP = 'biforesting:syncsnap';
 
 /**
  * Where op_res/presence messages and link-up notifications go (the op dispatcher). Wired by the
@@ -36,6 +37,14 @@ export interface OpSink {
   onOpRes(instanceKey: string, msg: OpResMsg): Promise<void>;
   onPresence(instanceKey: string, msg: PresenceMsg): Promise<void>;
   onLinkUp(instanceKey: string): Promise<void>;
+}
+
+/** Where player sync input goes (the sync service). Wired by the plugin's init like {@link OpSink}. */
+export interface SyncSink {
+  onPresence(identity: LinkIdentity, msg: PresenceMsg): Promise<void>;
+  onSyncSnap(identity: LinkIdentity, snap: DecodedSyncSnap): Promise<void>;
+  /** A resolved session registered, or got a re-sent reg_ack after a policy change. */
+  onLinkUp(identity: LinkIdentity): Promise<void>;
 }
 
 /** Highest link semantics version this Yggdrasil speaks. */
@@ -87,10 +96,16 @@ class BiforestingLinkManager {
   listening = false;
   private downSeq = 0;
   private opSink: OpSink | null = null;
+  private syncSink: SyncSink | null = null;
 
   /** Wire the op dispatcher (plugin init). */
   setOpSink(sink: OpSink | null): void {
     this.opSink = sink;
+  }
+
+  /** Wire the player sync service (plugin init). */
+  setSyncSink(sink: SyncSink | null): void {
+    this.syncSink = sink;
   }
 
   /** instanceKeys of all live, identity-resolved sessions (op dispatch sweep). */
@@ -227,12 +242,53 @@ class BiforestingLinkManager {
         }
         break;
       case PRESENCE:
-        if (s.identity?.resolved && this.opSink) {
-          await this.opSink.onPresence(s.identity.instanceKey, decodePresence(payload));
+        if (s.identity?.resolved && (this.opSink || this.syncSink)) {
+          const identity = s.identity;
+          const msg = decodePresence(payload);
+          try {
+            if (this.opSink) await this.opSink.onPresence(identity.instanceKey, msg);
+          } finally {
+            // After the op wake-ups, and still in message order, so join and quit land in order.
+            await this.syncPresence(identity, msg);
+          }
         }
+        break;
+      case SYNCSNAP:
+        if (s.identity?.resolved) await this.onSyncSnap(s, s.identity, payload);
         break;
       default:
         logger.debug({ sessionId: s.sessionId, channel, bytes: payload.length }, 'biforesting-link: unknown channel');
+    }
+  }
+
+  /** Player sync ledger from presence. A failure logs and goes on; op wake-ups already ran. */
+  private async syncPresence(identity: LinkIdentity, msg: PresenceMsg): Promise<void> {
+    if (!this.syncSink) return;
+    try {
+      await this.syncSink.onPresence(identity, msg);
+    } catch (err) {
+      logger.warn({ err, instanceKey: identity.instanceKey, event: msg.event }, 'biforesting-sync: presence ledger update failed');
+    }
+  }
+
+  /** `biforesting:syncsnap` (player-sync spec 3.4). A bad or unstorable message logs and drops. */
+  private async onSyncSnap(s: Session, identity: LinkIdentity, payload: Buffer): Promise<void> {
+    const ctx = { sessionId: s.sessionId, instanceKey: identity.instanceKey, bytes: payload.length };
+    if (!this.syncSink) {
+      logger.debug(ctx, 'biforesting-sync: syncsnap ignored, sync runtime not wired');
+      return;
+    }
+    let snap: DecodedSyncSnap;
+    try {
+      snap = decodeSyncSnap(payload);
+    } catch (err) {
+      logger.warn({ err, ...ctx }, 'biforesting-sync: syncsnap rejected');
+      return;
+    }
+    try {
+      await this.syncSink.onSyncSnap(identity, snap);
+    } catch (err) {
+      logger.warn({ err, ...ctx, uuid: snap.header.uuid, kind: snap.header.kind }, 'biforesting-sync: syncsnap not stored');
     }
   }
 
@@ -288,7 +344,9 @@ class BiforestingLinkManager {
    * same instance, binds the session, then replies with `biforesting:reg_ack` DOWN this same link.
    */
   private async onRegister(s: Session, payload: Buffer): Promise<void> {
-    const reg = decodeRegister(payload);
+    const reg = decodeRegister(payload, (reason) =>
+      logger.warn({ sessionId: s.sessionId, remote: s.remote, reason }, 'biforesting-sync: register sync tail ignored'),
+    );
     s.register = reg;
 
     const identity = await serverResolver.resolve(reg.serverId);
@@ -337,6 +395,7 @@ class BiforestingLinkManager {
         accepted: identity.resolved,
         duplicate: !!dup,
         ackSent: sent,
+        syncFp: reg.sync?.fp ?? null,
       },
       `biforesting-link: registered ${friendlyName || '(unnamed)'} (${canonicalServerId}) ` +
         `caps=0x${reg.capabilities.toString(16)} node=${reg.node}`,
@@ -356,6 +415,14 @@ class BiforestingLinkManager {
     // Link-up: flush any ops queued while this backend was away (at-least-once; mod journal dedups).
     if (identity.resolved && this.opSink) {
       await this.opSink.onLinkUp(identity.instanceKey);
+    }
+    // Player sync: a live group member gets its disowns reconciled (spec 6.6).
+    if (identity.resolved && this.syncSink) {
+      try {
+        await this.syncSink.onLinkUp(identity);
+      } catch (err) {
+        logger.warn({ err, sessionId: s.sessionId, instanceKey: identity.instanceKey }, 'biforesting-sync: link-up work failed');
+      }
     }
   }
 
@@ -392,7 +459,17 @@ class BiforestingLinkManager {
   async resendRegAck(server: string): Promise<boolean> {
     const s = this.getSessionByServer(server);
     if (!s || !s.identity) return false;
-    return this.sendRegAck(s, s.identity.serverId ?? s.identity.linkServerId, s.identity.name ?? '');
+    const identity = s.identity;
+    const sent = await this.sendRegAck(s, identity.serverId ?? identity.linkServerId, identity.name ?? '');
+    // Player sync: a grant of player_sync drives the sync work that waited for it, as a link-up does.
+    if (sent && identity.resolved && this.syncSink) {
+      try {
+        await this.syncSink.onLinkUp(identity);
+      } catch (err) {
+        logger.warn({ err, sessionId: s.sessionId, instanceKey: identity.instanceKey }, 'biforesting-sync: reg_ack work failed');
+      }
+    }
+    return sent;
   }
 
   /** Find another live session bound to the same resolved identity (instanceKey/serverId). */
@@ -478,6 +555,20 @@ class BiforestingLinkManager {
       }
     }
     return undefined;
+  }
+
+  /**
+   * The live session of one Pterodactyl serverId. Exact match only: a tag or an instanceKey can
+   * name another instance of the same group.
+   */
+  liveInstance(serverId: string): { instanceKey: string; capabilities: number; sync: RegisterSync | null } | null {
+    for (const s of this.sessions.values()) {
+      const id = s.identity;
+      if (id?.resolved && id.serverId === serverId && s.transport.writable()) {
+        return { instanceKey: id.instanceKey, capabilities: s.register?.capabilities ?? 0, sync: s.register?.sync ?? null };
+      }
+    }
+    return null;
   }
 
   getLastDataVersion(server: string): number | null {

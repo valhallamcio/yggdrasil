@@ -2,13 +2,13 @@ import express, { type Express } from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
 import { pinoHttp } from 'pino-http';
-import { rateLimit } from 'express-rate-limit';
 import { config } from './config/index.js';
 import { logger } from './core/logger/index.js';
 import { createRootRouter } from './router/index.js';
 import { errorHandler } from './middleware/error-handler.js';
 import { notFoundHandler } from './middleware/not-found.js';
 import { requestId } from './middleware/request-id.js';
+import { createRateLimiters, SYNC_API_PREFIX } from './middleware/rate-limit.js';
 
 export function createApp(): Express {
   const app = express();
@@ -55,14 +55,17 @@ export function createApp(): Express {
   app.use(express.urlencoded({ extended: true }));
 
   // ── Rate limiting ─────────────────────────────────────────────────────────
-  app.use(
-    rateLimit({
-      windowMs: config.RATE_LIMIT_WINDOW_MS,
-      max: config.RATE_LIMIT_MAX,
-      standardHeaders: true,
-      legacyHeaders: false,
-    })
-  );
+  // Per IP for every route except the player sync routes, which count per API key.
+  const limiters = createRateLimiters({
+    windowMs: config.RATE_LIMIT_WINDOW_MS,
+    max: config.RATE_LIMIT_MAX,
+    syncWindowMs: config.SYNC_RATE_LIMIT_WINDOW_MS,
+    syncMax: config.SYNC_RATE_LIMIT_MAX,
+    apiKeyHeader: config.API_KEY_HEADER,
+    apiKeys: config.API_KEYS,
+  });
+  app.use(limiters.global);
+  app.use(SYNC_API_PREFIX, limiters.sync);
 
   // ── Static files ──────────────────────────────────────────────────────────
   app.use(express.static('public'));

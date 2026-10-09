@@ -26,6 +26,11 @@ export interface OpCatalogEntry {
    * and the dispatcher fails a pending op of this type when the bit is gone at dispatch time.
    */
   requiresFeature?: string;
+  /**
+   * Only Yggdrasil itself creates ops of this type (the player sync runner). The generic
+   * `POST /:server/ops` route refuses them with a 400.
+   */
+  internal?: boolean;
   description: string;
 }
 
@@ -66,6 +71,142 @@ export const profileCaptureParams = z
     sampler: z.enum(PROFILE_SAMPLERS).default('java'),
   })
   .strict();
+
+// ── Player sync ops (bifrost-lib docs/invariants/player-sync.md 3.5) ─────────
+
+const syncGroup = z.string().min(1).max(64);
+const syncMoveId = z.string().min(1).max(64);
+const syncVersion = z.number().int().min(0);
+/** A Pterodactyl serverId. Empty when the player has no owner (a stuck move). */
+const syncServerId = z.string().max(64);
+const syncLabel = z.string().max(64);
+const syncMoveParams = z.object({ group: syncGroup, moveId: syncMoveId, v: syncVersion, to: syncServerId, toLabel: syncLabel }).strict();
+
+/** Most entries a single `sync_disown` op carries. */
+export const SYNC_DISOWN_MAX_ENTRIES = 500;
+/** Most entries a single `sync_own` op carries. */
+export const SYNC_OWN_MAX_ENTRIES = 500;
+/** Most entries a single `sync_lock` op carries. */
+export const SYNC_LOCK_MAX_ENTRIES = 500;
+
+const SYNC_OPS: Record<string, OpCatalogEntry> = {
+  sync_probe: {
+    params: z.object({ group: syncGroup }).strict(),
+    serverGlobal: false,
+    risk: 'safe',
+    requiresFeature: 'player_sync',
+    internal: true,
+    description: 'Player sync: read the online state, the .dat stamp, the fingerprint, the local move marks and the world-data locks of one player. Changes nothing.',
+  },
+  sync_prepare: {
+    params: syncMoveParams,
+    serverGlobal: false,
+    risk: 'reversible',
+    requiresFeature: 'player_sync',
+    internal: true,
+    description: 'Player sync on the source: scan the carried items. On a pass, refuse the player login there until the move ends.',
+  },
+  sync_release: {
+    params: syncMoveParams,
+    serverGlobal: false,
+    risk: 'dangerous',
+    requiresFeature: 'player_sync',
+    internal: true,
+    description: 'Player sync on the source: export the carried state of an offline player, stamp the .dat, send the release syncsnap.',
+  },
+  sync_apply: {
+    params: z
+      .object({ group: syncGroup, moveId: syncMoveId, v: syncVersion, sha256: z.string().regex(/^[0-9a-f]{64}$/), fp: z.string().max(128), snapshotId: z.string().min(1).max(256) })
+      .strict(),
+    serverGlobal: false,
+    risk: 'dangerous',
+    requiresFeature: 'player_sync',
+    internal: true,
+    description: 'Player sync on the target: write the carried state of a release snapshot into the offline player .dat. The blob is attached at dispatch; snapshotId stays in Yggdrasil.',
+  },
+  sync_commit: {
+    params: z.object({ group: syncGroup, moveId: syncMoveId, v: syncVersion }).strict(),
+    serverGlobal: false,
+    risk: 'reversible',
+    requiresFeature: 'player_sync',
+    internal: true,
+    description: 'Player sync on the source after the target applied: delete the exported world-data records and end the local move mark.',
+  },
+  sync_abort: {
+    params: z.object({ group: syncGroup, moveId: syncMoveId }).strict(),
+    serverGlobal: false,
+    risk: 'reversible',
+    requiresFeature: 'player_sync',
+    internal: true,
+    description: 'Player sync on the source: undo the local marks of a move that stopped.',
+  },
+  sync_kick: {
+    params: z.object({ group: syncGroup, message: z.string().min(1).max(256), to: syncServerId, toLabel: syncLabel }).strict(),
+    serverGlobal: false,
+    risk: 'safe',
+    requiresFeature: 'player_sync',
+    internal: true,
+    description: 'Player sync: disconnect a player who is online on an instance that does not own the character.',
+  },
+  sync_disown: {
+    params: z
+      .object({
+        group: syncGroup,
+        entries: z
+          .array(z.object({ u: z.string().min(1).max(64), v: syncVersion, to: syncServerId, toLabel: syncLabel }).strict())
+          .min(1)
+          .max(SYNC_DISOWN_MAX_ENTRIES),
+      })
+      .strict(),
+    serverGlobal: true,
+    risk: 'reversible',
+    requiresFeature: 'player_sync',
+    internal: true,
+    description: 'Player sync: mark players as away on this instance, so their local copy is refused at login.',
+  },
+  sync_own: {
+    params: z
+      .object({
+        group: syncGroup,
+        entries: z
+          .array(z.object({ u: z.string().min(1).max(64), v: syncVersion }).strict())
+          .min(1)
+          .max(SYNC_OWN_MAX_ENTRIES),
+      })
+      .strict(),
+    serverGlobal: true,
+    risk: 'reversible',
+    requiresFeature: 'player_sync',
+    internal: true,
+    description: 'Player sync after a restore: this instance owns these players, so clear the away and moving marks that the restore brought back. Writes no .dat.',
+  },
+  sync_lock: {
+    params: z
+      .object({
+        group: syncGroup,
+        entries: z
+          .array(
+            z
+              .object({
+                h: z.string().regex(/^[a-z0-9_.-]{1,64}$/),
+                key: z.string().min(1).max(256),
+                to: syncServerId,
+                toLabel: syncLabel,
+              })
+              .strict(),
+          )
+          .min(1)
+          .max(SYNC_LOCK_MAX_ENTRIES),
+      })
+      .strict(),
+    serverGlobal: true,
+    risk: 'reversible',
+    requiresFeature: 'player_sync',
+    internal: true,
+    description:
+      'Player sync after a restore: another instance owns these world-data records, or they are in transit, so this instance refuses to open them (lock state foreign). Reads and writes no record.',
+  },
+};
 
 export const OPS_CATALOG: Record<string, OpCatalogEntry> = {
   echo: {
@@ -272,6 +413,7 @@ export const OPS_CATALOG: Record<string, OpCatalogEntry> = {
     risk: 'dangerous',
     description: 'COMPOUND: snapshot → quest_reset(all) → claims transfer/release → team_reset → inventory_clear; fails at checkpoint, resumable via /ops/:id/resume.',
   },
+  ...SYNC_OPS,
 };
 
 export const DRY_RUN_CONFIRM_WINDOW_MS = 15 * 60_000;

@@ -6,6 +6,7 @@ import { getSnapshot } from './inv-store.js';
 import { getPolicy, FEATURE_BITS } from './policy-store.js';
 import { issueUploadGrant, profileUploadUrl, UPLOAD_GRACE_MS } from './profile-store.js';
 import type { OpsStore } from './ops-store.js';
+import type { SyncSnapshotDoc } from './sync-snapshot-store.js';
 import type { OpDoc, OpResMsg, PresenceMsg } from './types.js';
 
 export const OP_CHANNEL = 'biforesting:op';
@@ -21,6 +22,11 @@ export interface OpSendPort {
   linkServerIdFor?(instanceKey: string): string | null;
 }
 
+/** Where `sync_apply` blobs come from (the player sync snapshot store). */
+export interface SyncSnapshotSource {
+  get(id: string): Promise<SyncSnapshotDoc | null>;
+}
+
 /**
  * Drives `biforesting_ops` through its state machine: dispatches pending ops DOWN live links,
  * applies `op_res` acks/results, parks/wakes `waiting_player` ops on presence, and runs the
@@ -32,6 +38,7 @@ export interface OpSendPort {
 export class OpDispatcher {
   private sweepTimer: NodeJS.Timeout | null = null;
   private onUpdated: ((op: OpDoc) => Promise<void>) | null = null;
+  private syncSnapshots: SyncSnapshotSource | null = null;
 
   constructor(
     private readonly store: OpsStore,
@@ -42,6 +49,11 @@ export class OpDispatcher {
   /** Compound orchestration hook — fired (fire-and-forget) on every emitted op update. */
   setUpdateHook(hook: (op: OpDoc) => Promise<void>): void {
     this.onUpdated = hook;
+  }
+
+  /** Wire the player sync snapshot store. Without it a `sync_apply` fails at dispatch. */
+  setSyncSnapshots(source: SyncSnapshotSource | null): void {
+    this.syncSnapshots = source;
   }
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
@@ -95,10 +107,11 @@ export class OpDispatcher {
     const policy = await getPolicy(op.instanceKey);
     if ((policy.enabledFeatures & CAP_OPS) === 0) return false;
     // A per-type feature bit is a kill switch for that op type. A revoked bit fails the op, so a
-    // later grant does not fire a stale request.
+    // later grant does not fire a stale request. Code `feature_off` tells callers the mod never saw it.
     const feature = catalogEntry(op.type)?.requiresFeature;
     if (feature && (policy.enabledFeatures & (FEATURE_BITS[feature] ?? 0)) === 0) {
-      const failed = await this.store.markFailed(op._id, `feature '${feature}' is not granted for ${op.instanceKey}`);
+      const error = `feature '${feature}' is not granted for ${op.instanceKey}`;
+      const failed = await this.store.markFailed(op._id, error, { ok: false, error, code: 'feature_off' });
       if (failed) this.emitUpdated(failed);
       return false;
     }
@@ -112,6 +125,11 @@ export class OpDispatcher {
     let blob: Buffer | null = null;
     if (dispatched.type === 'restore_inventory') {
       const hydrated = await this.hydrateRestore(dispatched);
+      if (!hydrated) return false; // already marked failed with the reason
+      params = hydrated.params;
+      blob = hydrated.blob;
+    } else if (dispatched.type === 'sync_apply') {
+      const hydrated = await this.hydrateSyncApply(dispatched);
       if (!hydrated) return false; // already marked failed with the reason
       params = hydrated.params;
       blob = hydrated.blob;
@@ -178,6 +196,30 @@ export class OpDispatcher {
   }
 
   /**
+   * Attaches the release blob to a `sync_apply` dispatch (player-sync spec 3.5). The stored op
+   * names the snapshot by `snapshotId`; the wire params are `{group, moveId, v, sha256, fp}` and
+   * the gz bytes ride as the v2 blob. The mod gunzips. A snapshot that is gone or does not match
+   * fails the op with code `not_applied`, because the mod never saw it.
+   */
+  private async hydrateSyncApply(op: OpDoc): Promise<{ params: Record<string, unknown>; blob: Buffer } | null> {
+    const { snapshotId, ...wire } = op.params as Record<string, unknown> & { snapshotId?: unknown };
+    const fail = async (reason: string): Promise<null> => {
+      const failed = await this.store.markFailed(op._id, reason, { ok: false, error: reason, code: 'not_applied' });
+      if (failed) this.emitUpdated(failed);
+      logger.warn({ opId: op._id, snapshotId, reason }, 'biforesting-ops: sync_apply rejected');
+      return null;
+    };
+    if (!this.syncSnapshots) return fail('the sync snapshot store is not wired');
+    if (typeof snapshotId !== 'string') return fail('sync_apply has no snapshotId');
+    const snap = await this.syncSnapshots.get(snapshotId);
+    if (!snap) return fail(`sync snapshot ${snapshotId} not found`);
+    if (snap.sha256 !== wire['sha256']) return fail(`sync snapshot ${snapshotId} has another sha256`);
+    if (snap.group !== wire['group']) return fail(`sync snapshot ${snapshotId} belongs to group ${snap.group}`);
+    if (op.target?.uuid?.toLowerCase() !== snap.uuid) return fail(`sync snapshot ${snapshotId} is not the target player's`);
+    return { params: wire, blob: Buffer.from(snap.gz.buffer.subarray(0, snap.gz.position)) };
+  }
+
+  /**
    * Adds the artifact upload grant to a `profile_capture` or `profile_fetch` dispatch. The token
    * stays out of the stored op, so GET /ops never shows it. It expires 30 min after the op's result
    * deadline. A fetch token is bound to the requested captureId from the start.
@@ -241,9 +283,11 @@ export class OpDispatcher {
         ...(msg.durationMs !== undefined ? { durationMs: msg.durationMs } : {}),
       });
     } else if (msg.status === 'failed') {
+      // A failed result can carry a body (sync_prepare/sync_release `blocked` lists). Keep it.
       updated = await this.store.markFailed(msg.opId, msg.error ?? 'backend reported failure', {
         ok: false,
         error: msg.error ?? 'backend reported failure',
+        ...(msg.result !== undefined && msg.result !== null ? { data: msg.result } : {}),
         ...(msg.code !== undefined ? { code: msg.code } : {}),
         ...(msg.durationMs !== undefined ? { durationMs: msg.durationMs } : {}),
       });

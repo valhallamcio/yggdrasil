@@ -4,6 +4,15 @@ import type { ServerDocument, ShardDocument, StatsHistoryDocument } from './serv
 
 const DB_NAME = 'bifrost';
 
+export interface ServerSyncRow {
+  _id: ObjectId;
+  tag: string;
+  serverId: string;
+  name: string;
+  group?: unknown;
+  instanceNumber?: unknown;
+}
+
 const HOUR = 3_600_000;
 
 function pickBucket(rangeMs: number): { unit: 'minute' | 'hour' | 'day'; binSize: number } | null {
@@ -56,10 +65,11 @@ export class ServersRepository {
     return this.servers.find({ tag }).toArray();
   }
 
-  async findAllForSync(): Promise<Array<{ _id: ObjectId; tag: string; serverId: string; name: string }>> {
+  /** `group` and `instanceNumber` are Bifrost's instance-group fields; ungrouped servers lack them. */
+  async findAllForSync(): Promise<ServerSyncRow[]> {
     return this.servers
-      .find({}, { projection: { _id: 1, tag: 1, serverId: 1, name: 1 } })
-      .toArray() as Promise<Array<{ _id: ObjectId; tag: string; serverId: string; name: string }>>;
+      .find({}, { projection: { _id: 1, tag: 1, serverId: 1, name: 1, group: 1, instanceNumber: 1 } })
+      .toArray() as Promise<ServerSyncRow[]>;
   }
 
   // ── Shards ───────────────────────────────────────────────────────────────

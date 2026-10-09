@@ -2,7 +2,7 @@ import type { Request, Response } from 'express';
 import { biforestingLinkManager } from '../../plugins/biforesting-link/link-manager.js';
 import { encodeQuestDown, encodeChunksDown } from '../../plugins/biforesting-link/decoders.js';
 import { getPolicy, setPolicy, maskForFeatures, featureNamesForMask, normalizeFixIds } from '../../plugins/biforesting-link/policy-store.js';
-import { opDispatcher, opsStore, compoundOps } from '../../plugins/biforesting-link/ops-runtime.js';
+import { opDispatcher, opsStore, compoundOps, fanOutOpUpdate } from '../../plugins/biforesting-link/ops-runtime.js';
 import { COMPOUND_TYPES } from '../../plugins/biforesting-link/compound-ops.js';
 import { latestSnapshot, listSnapshots, getSnapshot } from '../../plugins/biforesting-link/inv-store.js';
 import { searchQuests, questRegistryInfo } from '../../plugins/biforesting-link/quest-registry-store.js';
@@ -340,6 +340,9 @@ export class BiforestingController {
     if (!entry) {
       throw new ValidationError(`Unknown op type '${body.type}' — known: ${Object.keys(OPS_CATALOG).join(', ')}`);
     }
+    if (entry.internal) {
+      throw new ValidationError(`'${body.type}' is created only by the player sync runner. Use /v1/biforesting/sync.`);
+    }
     const parsed = entry.params.safeParse(body.params);
     if (!parsed.success) {
       throw new ValidationError(`Invalid params for '${body.type}': ${parsed.error.issues.map((i) => i.message).join('; ')}`);
@@ -483,8 +486,9 @@ export class BiforestingController {
       throw new ValidationError(`Op ${opId} is '${existing.state}' — only pending/dispatched/waiting_player ops can be cancelled`);
     }
     // REST cancel bypasses the dispatcher's update hook — checkpoint the compound parent here
-    // (found live: cancelling a parked child left the parent pending forever).
-    await compoundOps.onChildUpdate(cancelled);
+    // (found live: cancelling a parked child left the parent pending forever). The sync runner
+    // gets the update the same way.
+    await fanOutOpUpdate(cancelled);
     res.json({ data: cancelled });
   };
 
@@ -496,6 +500,7 @@ export class BiforestingController {
         serverGlobal: e.serverGlobal,
         risk: e.risk,
         ...(e.requiresFeature ? { requiresFeature: e.requiresFeature } : {}),
+        ...(e.internal ? { internal: true } : {}),
         description: e.description,
       })),
     });
@@ -546,7 +551,7 @@ export class BiforestingController {
  * ArrayBuffer — `Buffer.from(gz.buffer)` on one of those serialized the whole allocation pool,
  * not the blob.
  */
-function binaryToBuffer(v: unknown): Buffer | null {
+export function binaryToBuffer(v: unknown): Buffer | null {
   if (v == null) return null;
   if (Buffer.isBuffer(v)) return v;
   const inner = (v as { buffer?: unknown }).buffer;
