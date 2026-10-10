@@ -111,7 +111,17 @@ const CHANGED_NOTHING: ReadonlySet<string> = new Set([
   // The mod answers these two before it runs the op: the bit is off, or sync is inert there.
   'feature_off',
   'inert',
+  // A per-player file the mod cannot read (contract-notes-mod F8). It does not fix itself, so no retry.
+  'cosarmor_unreadable',
+  'advancements_unreadable',
 ]);
+/** Changed-nothing codes that the move keeps as its own code, so the player line can name the file. */
+const UNREADABLE_CODES: ReadonlySet<string> = new Set(['cosarmor_unreadable', 'advancements_unreadable']);
+
+/** `code` as a move code when it names an unreadable player file, else null. */
+function unreadableCode(code: string): MoveCode | null {
+  return UNREADABLE_CODES.has(code) ? (code as MoveCode) : null;
+}
 const RELEASE_RETRY_CODES: ReadonlySet<string> = new Set(['not_applied', 'guard_busy']);
 /** The error text of an inert answer from a mod build that predates the `inert` code. */
 const INERT_ERROR = /player sync is inert/i;
@@ -125,6 +135,8 @@ export const SYNC_MESSAGES = {
   busy: 'Your character is already moving. Try again in a few seconds.',
   staff: 'Staff are moving your character. Join again in a minute.',
   questsBusy: 'Your quest book is being changed right now. Try again in a few seconds.',
+  cosarmorUnreadable: 'Your cosmetic armour data cannot be read.',
+  advancementsUnreadable: 'Your advancements cannot be read.',
 } as const;
 
 /** A refused move start. The body is `{error: {code, message, details}}`; Bifrost shows `message`. */
@@ -338,6 +350,10 @@ export function moveMessage(move: SyncMoveDoc, members: GroupMember[]): string {
           return `The move took too long. Your character stays on ${from}. Try again.`;
         case 'player_online':
           return `You were still online on ${from}, so the move stopped. Try again.`;
+        case 'cosarmor_unreadable':
+          return `${SYNC_MESSAGES.cosarmorUnreadable} Your character stays on ${from}. Open a ticket so staff can fix it.`;
+        case 'advancements_unreadable':
+          return `${SYNC_MESSAGES.advancementsUnreadable} Your character stays on ${from}. Open a ticket so staff can fix it.`;
         case 'cancelled':
           return move.error?.code === 'mode_off'
             ? `${SYNC_MESSAGES.paused} Your character stays on ${from}.`
@@ -1402,7 +1418,9 @@ export class SyncRunner implements SyncLiveHooks {
       return saved;
     }
     if (c.kind !== 'wait') {
-      const code: MoveCode = move.cancel ? 'cancelled' : c.kind === 'not_applied' && c.code === 'blocked' ? 'blocked' : 'error';
+      const code: MoveCode = move.cancel
+        ? 'cancelled'
+        : c.kind === 'not_applied' ? (c.code === 'blocked' ? 'blocked' : (unreadableCode(c.code) ?? 'error')) : 'error';
       return this.abort(move, code, { opId: op._id, blocked: blockedOf(op), detail: `prepare ${describe(op)}` });
     }
     if (move.cancel) return this.abort(move, 'cancelled', { opId: op._id });
@@ -1454,7 +1472,7 @@ export class SyncRunner implements SyncLiveHooks {
         return this.backToWaitQuit(move, op);
       }
       if (RELEASE_RETRY_CODES.has(c.code) && move.attempts.release < MAX_RELEASE_ATTEMPTS) return this.retry(move, 'release', op, c.code);
-      return this.abort(move, 'error', { opId: op._id, detail: `release ${describe(op)}` });
+      return this.abort(move, unreadableCode(c.code) ?? 'error', { opId: op._id, detail: `release ${describe(op)}` });
     }
     if (c.kind === 'unknown' || this.staleAcked(op)) return this.resolveRelease(move, op);
     if (move.cancel && isPreAck(op)) return (await this.deps.ops.cancel(op._id, 'sync-runner')) !== null;
@@ -1636,7 +1654,8 @@ export class SyncRunner implements SyncLiveHooks {
       if (move.applyUncertain) return this.markStuck(move, `apply ${describe(op)}, after an earlier apply attempt with an unknown outcome`);
       if (cancel) return this.abort(move, 'cancelled', { opId: op._id, detail: `apply ${describe(op)}` });
       if (c.code === 'guard_busy' && move.attempts.apply < MAX_APPLY_ATTEMPTS) return this.retry(move, 'apply', op, c.code);
-      const code: MoveCode = c.code === 'fingerprint_mismatch' ? 'fingerprint_mismatch' : c.code === 'player_online' ? 'player_online' : 'error';
+      const code: MoveCode =
+        c.code === 'fingerprint_mismatch' ? 'fingerprint_mismatch' : c.code === 'player_online' ? 'player_online' : (unreadableCode(c.code) ?? 'error');
       return this.abort(move, code, { opId: op._id, detail: `apply ${describe(op)}` });
     }
     if (c.kind === 'unknown' || this.staleAcked(op) || (cancel && op.state === 'acked')) {

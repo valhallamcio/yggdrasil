@@ -59,9 +59,12 @@
  *                                   marks, world-data records and locks the backup held come back
  *                                   (a null lock: the backup had none)
  *   POST /open {h,key}              open a world-data record: {refused: <text>|null} (spec 3.7)
- *   POST /quests {teams?:{teamId:{kind,name,owner,members,done}}, pref?:{uuid:'merge'|'separate'}}
+ *   POST /quests {teams?:{teamId:{kind,name,owner,members,done}}, pref?:{uuid:'merge'|'separate'},
+ *                 pending?:{uuid: serverId|''|null}}
  *                                   seed quest books (phase6 DESIGN 7). A player with no party gets a
- *                                   player team (team id = uuid) on first use.
+ *                                   player team (team id = uuid) on first use. `pending` marks a
+ *                                   quest record that waits for the next login ('' names no
+ *                                   source, null clears it); quests_status lists it.
  * Quest ops (phase6 DESIGN 4 and 7): quests_status, quests_action (pref, fresh, leave, undo),
  * quests_party_candidates, quests_export_party and quests_import_party run on the same op chain as
  * the sync ops. A move mark refuses them with code move_mark. quests_export_party sends the party
@@ -576,9 +579,10 @@ const sync = {
   rebuilds: 0,
   /**
    * Quest books: teamId → {kind: party|player, name, owner, members:[uuid], done:[questId]}; uuid →
-   * pref; uuid → local backups [{id, at, reason, teamId, done, undoable}]; party imports in order.
+   * pref; uuid → local backups [{id, at, reason, teamId, done, undoable}]; uuid → the source
+   * serverId of a pending record ('' when it names none); party imports in order.
    */
-  quests: { teams: {}, pref: {}, backups: {}, imports: [], seq: 0 },
+  quests: { teams: {}, pref: {}, backups: {}, pending: {}, imports: [], seq: 0 },
 };
 if (flags['--fault']) sync.faults = JSON.parse(flags['--fault']);
 
@@ -965,6 +969,7 @@ const handlers = {
       done: t.done.length,
       pref: sync.quests.pref[uuid] ?? 'merge',
       backups: (sync.quests.backups[uuid] ?? []).slice().reverse().map(({ id, at, reason, undoable }) => ({ id, at, reason, undoable })),
+      ...(Object.hasOwn(sync.quests.pending, uuid) ? { pending: sync.quests.pending[uuid] ? { fromServer: sync.quests.pending[uuid] } : {} } : {}),
     });
   },
 
@@ -1267,7 +1272,7 @@ const control = {
     else if (l?.state === 'foreign') refused = `This storage is on ${label}.`;
     return { exists: true, refused };
   },
-  /** Seeds quest books and prefs. A listed team replaces the one with its id. */
+  /** Seeds quest books, prefs and pending records. A listed team replaces the one with its id. */
   quests(b) {
     for (const [teamId, t] of Object.entries(b.teams ?? {})) {
       sync.quests.teams[teamId.toLowerCase()] = {
@@ -1279,6 +1284,10 @@ const control = {
       };
     }
     for (const [u, p] of Object.entries(b.pref ?? {})) sync.quests.pref[u.toLowerCase()] = p;
+    for (const [u, from] of Object.entries(b.pending ?? {})) {
+      if (from === null) delete sync.quests.pending[u.toLowerCase()];
+      else sync.quests.pending[u.toLowerCase()] = String(from);
+    }
     return { ok: true };
   },
 };

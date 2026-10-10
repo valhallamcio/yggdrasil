@@ -423,6 +423,7 @@ test('action: a parked op (waiting_player) is cancelled: 409 player_offline', as
 test('party candidates: every other member at once; a member without a link is offline, one that fails is error', async () => {
   const u = newUuid();
   await seed(u, Q1);
+  const statusSent = sentOf('quests_status').length;
   links.delete(Q3);
   try {
     const p = quests.partyCandidates('qg', u, 'test');
@@ -437,7 +438,7 @@ test('party candidates: every other member at once; a member without a link is o
       { serverId: Q3, instanceNumber: 3, label: 'Instance 3', status: 'offline' },
     ]);
     assert.deepEqual(view['parties'], [
-      { teamId: T2, name: 'Two', members: [{ uuid: u, name: 'Steve' }], done: 5, serverId: Q2, instanceNumber: 2, label: 'Instance 2', mergedInto: [] },
+      { teamId: T2, name: 'Two', members: [{ uuid: u, name: 'Steve' }], done: 5, serverId: Q2, instanceNumber: 2, label: 'Instance 2', mergedInto: [], merged: false },
     ]);
     assert.equal(sentOf('quests_party_candidates', Q3).length, 0, 'nothing goes to a member without a link');
   } finally {
@@ -455,6 +456,7 @@ test('party candidates: every other member at once; a member without a link is o
   assert.equal(inst[1]!['status'], 'error');
   assert.equal(inst[1]!['code'], 'not_ready');
   assert.deepEqual(view['offline'], [Q3], 'a member that did not answer counts as offline');
+  assert.equal(sentOf('quests_status').length, statusSent, 'no done merge: no status op to the owner');
 });
 
 // ── party merge ──────────────────────────────────────────────────────────────
@@ -527,12 +529,47 @@ test('party merge: status, export, import in order; one merge per pair; later ca
   const c = quests.partyCandidates('qg', u, 'test');
   await reply(await nextSent('quests_party_candidates', Q2), 'completed', { parties: [{ teamId: T2, name: 'Two', members: [], done: 2 }] });
   await reply(await nextSent('quests_party_candidates', Q3), 'completed', { parties: [] });
+  await reply(await nextSent('quests_status', Q1), 'completed', partyBook(T1));
   const parties = (await c)['parties'] as Array<Record<string, unknown>>;
   assert.equal(parties.length, 1);
   assert.deepEqual(
     (parties[0]!['mergedInto'] as Array<Record<string, unknown>>).map((m) => [m['targetServerId'], m['targetTeamId']]),
     [[Q1, T1]],
   );
+  assert.equal(parties[0]!['merged'], true, 'the pair merged into the owner party (F7)');
+});
+
+test('party candidates F7: merged needs a done merge into the owner current party; a failed owner status leaves it false', async () => {
+  const u = newUuid();
+  await seed(u, Q1);
+  const src = '55555555-0000-4000-8000-000000000005';
+  const home = '66666666-0000-4000-8000-000000000006';
+  const other = '77777777-0000-4000-8000-000000000007';
+  await merges.insertRunning({ group: 'qg', uuid: u, name: 'Steve', sourceServerId: Q2, sourceTeamId: src, targetServerId: Q1, targetTeamId: home, runId: 'r-f7', actor: 'test' });
+  await merges.update(questMergeId('qg', Q2, src, Q1, home), 'r-f7', { state: 'done', backupId: 'b-f7', endedAt: new Date() });
+  const list = async (ownerAnswer: (s: Sent) => Promise<void>): Promise<Array<Record<string, unknown>>> => {
+    const c = quests.partyCandidates('qg', u, 'test');
+    await reply(await nextSent('quests_party_candidates', Q2), 'completed', { parties: [{ teamId: src.toUpperCase(), name: 'Src', members: [], done: 3 }] });
+    await reply(await nextSent('quests_party_candidates', Q3), 'completed', { parties: [{ teamId: other, name: 'Three', members: [], done: 1 }] });
+    await ownerAnswer(await nextSent('quests_status', Q1));
+    const view = await c;
+    assert.equal(view['partial'], false);
+    return view['parties'] as Array<Record<string, unknown>>;
+  };
+  const merged = (parties: Array<Record<string, unknown>>): unknown[] => parties.map((p) => [p['teamId'], p['merged']]);
+
+  let parties = await list((s) => reply(s, 'completed', partyBook(home)));
+  assert.deepEqual(merged(parties), [[src, true], [other, false]], 'the owner is in the target party');
+
+  parties = await list((s) => reply(s, 'completed', partyBook(other)));
+  assert.deepEqual(merged(parties), [[src, false], [other, false]], 'the owner is in another party now');
+  assert.deepEqual((parties[0]!['mergedInto'] as Array<Record<string, unknown>>).map((m) => m['targetTeamId']), [home], 'mergedInto stays');
+
+  parties = await list((s) => reply(s, 'completed', { book: { kind: 'player', teamId: u, name: 'Steve', members: [] }, done: 0 }));
+  assert.deepEqual(merged(parties), [[src, false], [other, false]], 'a player book has no target party');
+
+  parties = await list((s) => reply(s, 'failed', undefined, 'move_mark'));
+  assert.deepEqual(merged(parties), [[src, false], [other, false]], 'a failed owner status: the answer stays, nothing counts as merged');
 });
 
 test('party merge: a failed export frees the pair; an import the mod refuses answers ok false; the retry merges', async () => {

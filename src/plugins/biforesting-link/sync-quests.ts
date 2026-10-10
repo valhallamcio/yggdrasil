@@ -248,7 +248,8 @@ export class SyncQuests {
    * GET .../quests/party-candidates: `quests_party_candidates` on every other member at once. A
    * member without a live link, or one whose op fails, goes into `offline` (and `instances` with
    * its status); the other members still answer (`partial: true`). Each party carries the
-   * `serverId` that holds it and the `done` merges out of it.
+   * `serverId` that holds it, the `done` merges out of it, and `merged`: true when one of them
+   * went into the owner's current party.
    */
   async partyCandidates(group: string, rawUuid: string, actor: string): Promise<Record<string, unknown>> {
     const deadline = this.now() + this.timing.candidatesMs;
@@ -280,6 +281,8 @@ export class SyncQuests {
       group,
       parties.map((p) => ({ serverId: String(p['serverId']), teamId: String(p['teamId']) })),
     );
+    // Only a done merge into the owner's instance can mark a party. Then the owner's party names the target.
+    const target = done.some((d) => d.targetServerId === at.owner) ? await this.ownerParty(group, uuid, at, actor, deadline) : null;
     return {
       group,
       uuid,
@@ -288,13 +291,35 @@ export class SyncQuests {
       partial: answers.some((a) => a.instance.status !== 'ok'),
       offline: answers.filter((a) => a.instance.status !== 'ok').map((a) => a.instance.serverId),
       instances: answers.map((a) => a.instance),
-      parties: parties.map((p) => ({
-        ...p,
-        mergedInto: done
-          .filter((d) => d.sourceServerId === p['serverId'] && d.sourceTeamId === p['teamId'])
-          .map((d) => ({ targetServerId: d.targetServerId, targetTeamId: d.targetTeamId, at: d.endedAt })),
-      })),
+      parties: parties.map((p) => {
+        const out = done.filter((d) => d.sourceServerId === p['serverId'] && d.sourceTeamId === p['teamId']);
+        return {
+          ...p,
+          mergedInto: out.map((d) => ({ targetServerId: d.targetServerId, targetTeamId: d.targetTeamId, at: d.endedAt })),
+          merged: target !== null && out.some((d) => d.targetServerId === at.owner && d.targetTeamId === target),
+        };
+      }),
     };
+  }
+
+  /**
+   * The lower-case team id of the owner's current party, from `quests_status` on the owner. Null
+   * when the book is not a party, or when the owner has no link or the op fails: then no
+   * candidate counts as merged, and the import still refuses a second merge.
+   */
+  private async ownerParty(group: string, uuid: string, at: OwnerAt, actor: string, deadline: number): Promise<string | null> {
+    const link = await this.deps.links.instance(at.owner);
+    if (!link || (link.grantedFeatures & PLAYER_SYNC) === 0 || (link.grantedFeatures & OPS) === 0) return null;
+    try {
+      const { data } = await this.call(at.owner, 'quests_status', { group, uuid }, { uuid, name: at.doc.name }, actor, at.members, deadline);
+      const book = isRecord(data['book']) ? data['book'] : null;
+      return book && book['kind'] === 'party' && typeof book['teamId'] === 'string' ? book['teamId'].toLowerCase() : null;
+    } catch (err) {
+      const code = err instanceof AppError ? err.code : 'error';
+      const message = err instanceof Error ? err.message : String(err);
+      logger.warn({ group, uuid, owner: at.owner, code, message }, 'biforesting-sync: quest party candidates could not read the owner party; no candidate counts as merged');
+      return null;
+    }
   }
 
   /**

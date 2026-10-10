@@ -462,6 +462,32 @@ test('abort: release blocked keeps online(A, n)', async () => {
   assert.equal((await lastOp(u, 'sync_abort')).instanceKey, ik(A));
 });
 
+test('abort: an unreadable player file aborts at once with its own code and line; no retry, no probe of the source', async () => {
+  for (const code of ['cosarmor_unreadable', 'advancements_unreadable']) {
+    const u = newUuid();
+    await seed(u, A, 3);
+    const id = await toRelease(u);
+    await answer(await lastOp(u, 'sync_release'), 'failed', undefined, code);
+    const m = await moveOf(id);
+    assert.deepEqual([m.outcome, m.code], ['aborted', code]);
+    assert.equal((await opsOf(u, 'sync_release')).length, 1, `${code}: no release retry`);
+    assert.equal((await opsOf(u, 'sync_probe')).filter((o) => o.instanceKey === ik(A)).length, 0, `${code}: no probe of the source`);
+    const doc = await ledger.get('evol', u);
+    assert.deepEqual([doc?.state, doc?.owner, doc?.version], ['online', A, 3]);
+    const file = code === 'cosarmor_unreadable' ? 'cosmetic armour data' : 'advancements';
+    assert.match((await current.getMove('evol', u, id)).message, new RegExp(`^Your ${file} cannot be read\\. Your character stays on .+\\. Open a ticket so staff can fix it\\.$`));
+    assert.equal((await lastOp(u, 'sync_abort')).instanceKey, ik(A));
+  }
+
+  const u = newUuid();
+  await seed(u, A, 0);
+  const { id } = await toApply(u);
+  await answer(await lastOp(u, 'sync_apply'), 'failed', undefined, 'cosarmor_unreadable');
+  const m = await moveOf(id);
+  assert.deepEqual([m.outcome, m.code], ['aborted', 'cosarmor_unreadable'], 'an unreadable file on the target aborts too');
+  assert.equal((await opsOf(u, 'sync_apply')).length, 1, 'no apply retry');
+});
+
 test('abort: a release result without a stored snapshot retries with a new key, then aborts at online(A, n+1)', async () => {
   const u = newUuid();
   await seed(u, A, 2);

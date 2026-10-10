@@ -21,7 +21,17 @@ export const OPEN_STEPS: readonly MoveStep[] = ['prepare', 'wait_quit', 'release
 export type MoveOutcome = 'committed' | 'aborted' | 'stuck' | 'cancelled';
 
 /** The `code` of a move that did not commit (spec 6.1). */
-export const MOVE_CODES = ['blocked', 'fingerprint_mismatch', 'timeout', 'player_online', 'cancelled', 'error'] as const;
+export const MOVE_CODES = [
+  'blocked',
+  'fingerprint_mismatch',
+  'timeout',
+  'player_online',
+  'cancelled',
+  'error',
+  // A per-player file the mod cannot read; the player needs staff (contract-notes-mod F8).
+  'cosarmor_unreadable',
+  'advancements_unreadable',
+] as const;
 export type MoveCode = (typeof MOVE_CODES)[number];
 
 export type MoveKind = 'move' | 'force_release';

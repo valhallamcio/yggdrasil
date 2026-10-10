@@ -1124,6 +1124,11 @@ const scenarios = [
     eq(r.status, 200, `status: ${JSON.stringify(r.body)}`);
     const s = r.body.data;
     eq([s.owner, s.book.kind, s.book.teamId, s.book.owner, s.done, s.pref], [Q1, 'player', p.uuid, null, 3, 'merge'], 'status');
+    eq(s.pending, undefined, 'no pending record: no pending field');
+    await fq1.quests({ pending: { [p.uuid]: Q2 } });
+    r = await api('GET', qPath(p.uuid));
+    eq(r.body.data?.pending, { fromServer: Q2 }, 'a pending record passes through the status (F6)');
+    await fq1.quests({ pending: { [p.uuid]: null } });
 
     r = await api('POST', qPath(p.uuid, '/action'), { action: 'pref', value: 'separate' });
     eq([r.status, r.body.data?.ok], [200, true], `pref: ${JSON.stringify(r.body)}`);
@@ -1169,6 +1174,7 @@ const scenarios = [
     let r = await api('GET', qPath(p.uuid, '/party-candidates'));
     eq(r.status, 200, `candidates: ${JSON.stringify(r.body)}`);
     eq(r.body.data.parties.map((x) => [x.serverId, x.teamId, x.done]).sort(), [[Q2, t2, 2], [Q3, t3, 1]], 'both parties');
+    eq(r.body.data.parties.map((x) => x.merged), [false, false], 'no party merged yet');
     eq([r.body.data.partial, r.body.data.offline], [false, []], 'every member answered');
 
     await fq3.disconnect({ holdDown: true });
@@ -1211,6 +1217,7 @@ const scenarios = [
     r = await api('GET', qPath(p.uuid, '/party-candidates'));
     const cand = r.body.data?.parties?.find((x) => x.teamId === source);
     eq(cand?.mergedInto?.map((m) => [m.targetServerId, m.targetTeamId]), [[Q1, target]], 'the candidate lists the merge');
+    eq(cand?.merged, true, 'the candidate is marked merged into this party (F7)');
     const snaps = await preActionSnaps(p.uuid, 1);
     assert(snaps.some((x) => x.header.action === 'party_merge' && x.header.backupId === backupId), 'pre_action snapshot of the merge');
     eq(await questLease(p.uuid), null, 'no quest lock is left');
