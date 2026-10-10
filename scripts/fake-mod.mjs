@@ -59,6 +59,14 @@
  *                                   marks, world-data records and locks the backup held come back
  *                                   (a null lock: the backup had none)
  *   POST /open {h,key}              open a world-data record: {refused: <text>|null} (spec 3.7)
+ *   POST /quests {teams?:{teamId:{kind,name,owner,members,done}}, pref?:{uuid:'merge'|'separate'}}
+ *                                   seed quest books (phase6 DESIGN 7). A player with no party gets a
+ *                                   player team (team id = uuid) on first use.
+ * Quest ops (phase6 DESIGN 4 and 7): quests_status, quests_action (pref, fresh, leave, undo),
+ * quests_party_candidates, quests_export_party and quests_import_party run on the same op chain as
+ * the sync ops. A move mark refuses them with code move_mark. Every write backs up the book first:
+ * a local backup (listed by quests_status) and a `pre_action` syncsnap with its backupId. A mod
+ * build without these ops is the fault answerCode {quests_<op>: {code: 'unsupported_op'}}.
  * Fault flags (counts are "times left"; a missing count means every time):
  *   dropResult: {<type>: n}                      run the op, ack, never send its result
  *   answerCode: {<type>: {code, count?}}         answer the op as failed with that code, run nothing
@@ -340,7 +348,7 @@ function decodeOp(payload) {
 function onOp(payload) {
   const { op, blob } = decodeOp(payload);
   console.log(`[fake-mod] op ${op.opId} type=${op.type} mode=${opMode}${blob ? ` blob=${blob.length}B` : ''}`);
-  if (SYNC_MODE && op.type.startsWith('sync_')) {
+  if (SYNC_MODE && (op.type.startsWith('sync_') || op.type.startsWith('quests_'))) {
     onSyncOp(op, blob);
     return;
   }
@@ -564,6 +572,11 @@ const sync = {
   faults: {},
   /** Release re-runs salted by the saltRelease fault. */
   rebuilds: 0,
+  /**
+   * Quest books: teamId → {kind: party|player, name, owner, members:[uuid], done:[questId]}; uuid →
+   * pref; uuid → local backups [{id, at, reason, teamId, done, undoable}]; party imports in order.
+   */
+  quests: { teams: {}, pref: {}, backups: {}, imports: [], seq: 0 },
 };
 if (flags['--fault']) sync.faults = JSON.parse(flags['--fault']);
 
@@ -681,6 +694,8 @@ function sendSyncSnap(kind, uuid, extra, root, report) {
     v: extra.v ?? 0,
     ...(extra.group ? { group: extra.group } : {}),
     ...(extra.moveId ? { moveId: extra.moveId } : {}),
+    ...(extra.action ? { action: extra.action } : {}),
+    ...(extra.backupId ? { backupId: extra.backupId } : {}),
     fp: SYNC_FP,
     dv: SYNC_DV,
     sha256: sha256hex(gz),
@@ -938,7 +953,116 @@ const handlers = {
     }
     return ok({ locked, kept });
   },
+
+  quests_status(op, uuid) {
+    const refused = questMoveMark(uuid);
+    if (refused) return refused;
+    const [teamId, t] = questBook(uuid);
+    return ok({
+      book: { kind: t.kind, teamId, name: t.name, owner: t.kind === 'party' ? t.owner : null, members: questMembers(t) },
+      done: t.done.length,
+      pref: sync.quests.pref[uuid] ?? 'merge',
+      backups: (sync.quests.backups[uuid] ?? []).slice().reverse().map(({ id, at, reason, undoable }) => ({ id, at, reason, undoable })),
+    });
+  },
+
+  quests_action(op, uuid) {
+    const refused = questMoveMark(uuid);
+    if (refused) return refused;
+    const { action, value, backupId } = op.params;
+    const [teamId, t] = questBook(uuid);
+    if (action === 'pref') {
+      sync.quests.pref[uuid] = value;
+      return ok({ ok: true, backupId: null });
+    }
+    if (action === 'fresh') {
+      if (t.kind === 'party') return ok({ ok: false, code: 'in_party' });
+      const b = questBackup(op, uuid, teamId, t, 'fresh');
+      t.done = [];
+      return ok({ ok: true, backupId: b.id });
+    }
+    if (action === 'leave') {
+      if (t.kind !== 'party') return ok({ ok: false, code: 'not_in_party' });
+      if (t.owner === uuid && t.members.length > 1) return ok({ ok: false, code: 'party_owner' });
+      const b = questBackup(op, uuid, teamId, t, 'leave');
+      t.members = t.members.filter((m) => m !== uuid);
+      const solo = questPlayerTeam(uuid);
+      solo.done = questUnion(solo.done, t.done);
+      return ok({ ok: true, backupId: b.id });
+    }
+    if (action === 'undo') {
+      if (t.kind === 'party' && t.owner !== uuid) return ok({ ok: false, code: 'not_party_owner' });
+      const list = (sync.quests.backups[uuid] ?? []).filter((x) => x.teamId === teamId);
+      const b = backupId ? list.find((x) => x.id === backupId) : list.filter((x) => x.undoable).at(-1);
+      if (!b) return ok({ ok: false, code: 'no_backup' });
+      if (!b.undoable) return ok({ ok: false, code: 'already_undone' });
+      questBackup(op, uuid, teamId, t, 'undo').undoable = false;
+      t.done = [...b.done];
+      b.undoable = false;
+      return ok({ ok: true, backupId: b.id });
+    }
+    return fail('bad_value', `unknown action ${action}`);
+  },
+
+  quests_party_candidates(op, uuid) {
+    const parties = Object.entries(sync.quests.teams)
+      .filter(([, t]) => t.kind === 'party' && t.members.includes(uuid))
+      .map(([teamId, t]) => ({ teamId, name: t.name, members: questMembers(t), done: t.done.length }));
+    return ok({ parties });
+  },
+
+  quests_export_party(op) {
+    const teamId = String(op.params.teamId).toLowerCase();
+    const t = sync.quests.teams[teamId];
+    if (!t || t.kind !== 'party') return fail('party_gone', `no party ${teamId} here`);
+    return ok({ record: { teamId, name: t.name, members: [...t.members], done: [...t.done], bookHash: 'fake-book' } });
+  },
+
+  quests_import_party(op, uuid) {
+    const refused = questMoveMark(uuid);
+    if (refused) return refused;
+    const [teamId, t] = questBook(uuid);
+    if (t.kind !== 'party') return ok({ ok: false, code: 'not_in_party' });
+    if (t.owner !== uuid) return ok({ ok: false, code: 'not_party_owner' });
+    if (teamId === String(op.params.sourceTeamId).toLowerCase()) return ok({ ok: false, code: 'same_team' });
+    const rec = op.params.record;
+    const b = questBackup(op, uuid, teamId, t, 'party_merge');
+    t.done = questUnion(t.done, Array.isArray(rec?.done) ? rec.done : []);
+    sync.quests.imports.push({ uuid, teamId, sourceServerId: op.params.sourceServerId, sourceTeamId: op.params.sourceTeamId, at: Date.now() });
+    return ok({ ok: true, backupId: b.id });
+  },
 };
+
+// ── quest books (phase6 DESIGN 3, 4 and 5) ──
+
+function questPlayerTeam(uuid) {
+  sync.quests.teams[uuid] ??= { kind: 'player', name: sync.names[uuid] ?? '', owner: uuid, members: [uuid], done: [] };
+  return sync.quests.teams[uuid];
+}
+
+/** The book of a player here: the party that holds the uuid, else the player team. */
+function questBook(uuid) {
+  for (const [teamId, t] of Object.entries(sync.quests.teams)) if (t.kind === 'party' && t.members.includes(uuid)) return [teamId, t];
+  return [uuid, questPlayerTeam(uuid)];
+}
+
+const questMembers = (t) => t.members.map((u) => ({ uuid: u, name: sync.names[u] ?? '' }));
+const questUnion = (a, b) => [...new Set([...a, ...b])].sort();
+
+function questMoveMark(uuid) {
+  return sync.moving[uuid] || sync.away[uuid] ? fail('move_mark', 'a move mark is set for this player') : null;
+}
+
+/** The local backup of one book before a write, and its central copy: a `pre_action` syncsnap. */
+function questBackup(op, uuid, teamId, t, reason) {
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+/, '');
+  const b = { id: `${stamp}-${reason}-${++sync.quests.seq}`, at: Date.now(), reason, teamId, done: [...t.done], undoable: true };
+  (sync.quests.backups[uuid] ??= []).push(b);
+  const v = stampOf(sync.dats[uuid])?.v ?? 0;
+  const root = { DataVersion: SYNC_DV, uuid, group: op.params.group, v, moveId: '', carried: {}, playerData: { ftbquests: { teamId, done: [...t.done] } }, worldData: {} };
+  sendSyncSnap('pre_action', uuid, { v, group: op.params.group, action: reason, backupId: b.id }, root, null);
+  return b;
+}
 
 /** One sync op at a time, like the mod's offline-edit guard. */
 let syncChain = Promise.resolve();
@@ -977,7 +1101,7 @@ async function runSyncOp(op, blob, silent) {
     const uuid = op.target?.uuid ? String(op.target.uuid).toLowerCase() : null;
     const h = handlers[op.type];
     if (!h) out = fail('unsupported_op', `${op.type} is not a sync op here`);
-    else if (!['sync_disown', 'sync_own', 'sync_lock'].includes(op.type) && !uuid) out = fail('not_applied', `${op.type}: target.uuid must be a uuid`);
+    else if (!['sync_disown', 'sync_own', 'sync_lock', 'quests_export_party'].includes(op.type) && !uuid) out = fail('not_applied', `${op.type}: target.uuid must be a uuid`);
     else out = h(op, uuid, blob);
   }
   if (out.crash) {
@@ -1026,6 +1150,7 @@ function syncState() {
     refusals: sync.refusals,
     sent: sync.sent,
     faults: sync.faults,
+    quests: sync.quests,
   };
 }
 
@@ -1128,6 +1253,20 @@ const control = {
     else if (l?.state === 'tombstone' && l.until > Date.now()) refused = `This storage moved to ${label}.`;
     else if (l?.state === 'foreign') refused = `This storage is on ${label}.`;
     return { exists: true, refused };
+  },
+  /** Seeds quest books and prefs. A listed team replaces the one with its id. */
+  quests(b) {
+    for (const [teamId, t] of Object.entries(b.teams ?? {})) {
+      sync.quests.teams[teamId.toLowerCase()] = {
+        kind: t.kind ?? 'party',
+        name: t.name ?? '',
+        owner: String(t.owner ?? '').toLowerCase(),
+        members: (t.members ?? []).map((u) => String(u).toLowerCase()),
+        done: [...(t.done ?? [])],
+      };
+    }
+    for (const [u, p] of Object.entries(b.pref ?? {})) sync.quests.pref[u.toLowerCase()] = p;
+    return { ok: true };
   },
 };
 

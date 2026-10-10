@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { UUID_RE } from '../../plugins/biforesting-link/decoders.js';
 import { CAPTURE_ID_RE, PROFILE_ARTIFACT_NAMES } from '../../plugins/biforesting-link/profile-upload.js';
 
 /**
@@ -208,6 +209,91 @@ const SYNC_OPS: Record<string, OpCatalogEntry> = {
   },
 };
 
+// ── Quest progress ops (Phase 6: valhallamc-work evol-multi-instance-2026-10/phase6/DESIGN.md 7) ──
+
+const questUuid = z.string().regex(UUID_RE, 'must be a dashed UUID');
+
+export const QUEST_ACTIONS = ['pref', 'fresh', 'leave', 'undo'] as const;
+export const QUEST_PREFS = ['merge', 'separate'] as const;
+
+/** A backup id names one local backup directory on the instance. */
+export const questBackupId = z
+  .string()
+  .regex(/^[A-Za-z0-9._-]{1,128}$/, 'backupId must match [A-Za-z0-9._-]{1,128}')
+  .refine((v) => v !== '.' && v !== '..', 'backupId must name a backup');
+
+/** The most JSON characters of one exported party record. The largest evol book is about 200 KB. */
+export const QUEST_RECORD_MAX_CHARS = 4 * 1024 * 1024;
+
+/** The fields of one `/quests` menu action, shared by the REST body and the op params. */
+export const questActionFields = {
+  action: z.enum(QUEST_ACTIONS),
+  value: z.enum(QUEST_PREFS).optional(),
+  backupId: questBackupId.optional(),
+};
+
+/** `pref` needs a value. Only `undo` takes a backupId. No other action takes either. */
+export function questActionRule(b: { action: (typeof QUEST_ACTIONS)[number]; value?: unknown; backupId?: unknown }, ctx: z.RefinementCtx): void {
+  if (b.action === 'pref' && b.value === undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['value'], message: 'pref needs a value' });
+  if (b.action !== 'pref' && b.value !== undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['value'], message: `${b.action} takes no value` });
+  if (b.action !== 'undo' && b.backupId !== undefined) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['backupId'], message: `${b.action} takes no backupId` });
+  }
+}
+
+/** The opaque record of `quests_export_party`: a JSON object or a string, passed on as is. */
+const questRecord = z
+  .union([z.record(z.string(), z.unknown()), z.string().min(1)])
+  .refine((r) => JSON.stringify(r).length <= QUEST_RECORD_MAX_CHARS, `record is larger than ${QUEST_RECORD_MAX_CHARS} JSON characters`);
+
+const QUEST_OPS: Record<string, OpCatalogEntry> = {
+  quests_status: {
+    params: z.object({ group: syncGroup, uuid: questUuid }).strict(),
+    serverGlobal: false,
+    risk: 'safe',
+    requiresFeature: 'player_sync',
+    internal: true,
+    description: 'Quest progress: the book of a player on this instance (solo or party), quests done, the pref and the newest local backups. Changes nothing.',
+  },
+  quests_action: {
+    params: z
+      .object({ group: syncGroup, uuid: questUuid, ...questActionFields })
+      .strict()
+      .superRefine(questActionRule),
+    serverGlobal: false,
+    risk: 'reversible',
+    requiresFeature: 'player_sync',
+    internal: true,
+    description: 'Quest progress: one /quests menu action (pref, fresh, leave, undo). The mod backs up every file it changes first.',
+  },
+  quests_party_candidates: {
+    params: z.object({ group: syncGroup, uuid: questUuid }).strict(),
+    serverGlobal: false,
+    risk: 'safe',
+    requiresFeature: 'player_sync',
+    internal: true,
+    description: 'Quest progress: the parties on this instance that hold the player, with members and quests done. Changes nothing.',
+  },
+  quests_export_party: {
+    params: z.object({ group: syncGroup, teamId: questUuid }).strict(),
+    serverGlobal: true,
+    risk: 'safe',
+    requiresFeature: 'player_sync',
+    internal: true,
+    description: 'Quest progress: export the book of one party on this instance as a record for quests_import_party. Read only.',
+  },
+  quests_import_party: {
+    params: z
+      .object({ group: syncGroup, uuid: questUuid, record: questRecord, sourceServerId: z.string().min(1).max(64), sourceTeamId: questUuid })
+      .strict(),
+    serverGlobal: false,
+    risk: 'reversible',
+    requiresFeature: 'player_sync',
+    internal: true,
+    description: "Quest progress: merge an exported party book into the player's current party on this instance (party owner only). The mod backs up the book first.",
+  },
+};
+
 export const OPS_CATALOG: Record<string, OpCatalogEntry> = {
   echo: {
     params: z.object({ message: z.string().min(1).max(4096) }).strict(),
@@ -414,6 +500,7 @@ export const OPS_CATALOG: Record<string, OpCatalogEntry> = {
     description: 'COMPOUND: snapshot → quest_reset(all) → claims transfer/release → team_reset → inventory_clear; fails at checkpoint, resumable via /ops/:id/resume.',
   },
   ...SYNC_OPS,
+  ...QUEST_OPS,
 };
 
 export const DRY_RUN_CONFIRM_WINDOW_MS = 15 * 60_000;

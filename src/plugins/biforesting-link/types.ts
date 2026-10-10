@@ -198,7 +198,8 @@ export interface SyncStamp {
   m?: string;
 }
 
-export type SyncSnapKind = 'shadow' | 'release' | 'pre_sync';
+/** `pre_action`: the book before a `/quests` action or a party import (phase6 DESIGN 5.3). */
+export type SyncSnapKind = 'shadow' | 'release' | 'pre_sync' | 'pre_action';
 
 export interface SyncBlockedEntry {
   where: string;
@@ -231,6 +232,10 @@ export interface SyncSnapHeader {
   group?: string;
   v: number;
   moveId?: string;
+  /** `pre_action` only: the action (`fresh`, `leave`, `undo`, `party_merge`, ...). */
+  action?: string;
+  /** `pre_action` only: the id of the local backup the mod took for the same write. */
+  backupId?: string;
   fp?: string;
   dv?: number;
   /** Lowercase hex of the gz bytes. */

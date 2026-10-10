@@ -184,6 +184,18 @@ test('syncsnap: release keeps group and moveId', () => {
   assert.equal(h.v, 8);
 });
 
+test('syncsnap: pre_action keeps group, action and backupId; a non-string action is dropped', () => {
+  const { header: h } = decodeSyncSnap(syncsnap(header({ kind: 'pre_action', group: 'evol', v: 4, action: 'fresh', backupId: '20261010T193000Z-fresh' })));
+  assert.equal(h.kind, 'pre_action');
+  assert.equal(h.group, 'evol');
+  assert.equal(h.action, 'fresh');
+  assert.equal(h.backupId, '20261010T193000Z-fresh');
+  assert.equal(h.moveId, undefined);
+  const { header: odd } = decodeSyncSnap(syncsnap(header({ kind: 'pre_action', action: 7, backupId: '' })));
+  assert.equal(odd.action, undefined);
+  assert.equal(odd.backupId, undefined);
+});
+
 test('syncsnap: bad version, kind, uuid and v are refused', () => {
   assert.throws(() => decodeSyncSnap(syncsnap(header(), GZ, GZ.length, 2)), /unsupported syncsnap version/);
   assert.throws(() => decodeSyncSnap(syncsnap(header({ kind: 'backup' }))), /kind backup is unknown/);

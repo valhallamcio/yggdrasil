@@ -8,10 +8,14 @@
  *
  * It starts mongodb-memory-server on 127.0.0.1:27117, seeds `bifrost.servers` (A and B in group
  * `evol`, C ungrouped), starts Yggdrasil from this checkout on 127.0.0.1:3123 (`node --import tsx
- * src/main.ts`), starts fake mods A and B, grants the policy and runs scenarios a to t against the
+ * src/main.ts`), starts fake mods A and B, grants the policy and runs scenarios a to y against the
  * REST API (the dupe audit l runs last). Each scenario prints one PASS or FAIL line. Exit 0 only
  * when all pass. Every process it started stops at the end. Logs: /tmp/sync-e2e-ygg.log,
  * /tmp/sync-e2e-fake-A.log, /tmp/sync-e2e-fake-B.log.
+ *
+ * The quest scenarios u to y (phase6 DESIGN 4 and 7) use their own group `qst` with three fake mods
+ * Q1 to Q3 (logs /tmp/sync-e2e-fake-Q<n>.log). The first of them starts the fakes and sets the
+ * group live, so the evol scenarios and the dupe audit never see them.
  *
  * The PSK comes from BIFORESTING_PSK, else from ../../bifrost-lib/.env next to this checkout.
  * A run takes about 10 minutes: scenarios d and n wait out the 120 s exec timeout of an op with no result.
@@ -38,7 +42,12 @@ const C = 'cccc0003';
 const BP = 'sophisticatedbackpacks';
 const FP = createHash('sha256').update('sync-e2e fingerprint').digest('hex');
 const FP_OTHER = createHash('sha256').update('sync-e2e other pack version').digest('hex');
-const CONTROL = { [A]: 3201, [B]: 3202 };
+const QGROUP = 'qst';
+const Q1 = 'qqqq0001';
+const Q2 = 'qqqq0002';
+const Q3 = 'qqqq0003';
+const CONTROL = { [A]: 3201, [B]: 3202, [Q1]: 3203, [Q2]: 3204, [Q3]: 3205 };
+const LOG_TAG = { [A]: 'A', [B]: 'B', [Q1]: 'Q1', [Q2]: 'Q2', [Q3]: 'Q3' };
 const FEATURES = ['play_transport', 'ops', 'presence', 'player_sync'];
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -137,7 +146,7 @@ async function stopYggdrasil(signal = 'SIGTERM') {
 }
 
 function startFake(serverId) {
-  const out = openSync(`/tmp/sync-e2e-fake-${serverId === A ? 'A' : 'B'}.log`, 'a');
+  const out = openSync(`/tmp/sync-e2e-fake-${LOG_TAG[serverId]}.log`, 'a');
   const args = [resolve(ROOT, 'scripts/fake-mod.mjs'), '127.0.0.1', String(YGG_PORT), serverId, '--sync', '--fp', FP, '--control-port', String(CONTROL[serverId])];
   return track(spawn(process.execPath, args, { cwd: ROOT, env: { PATH: process.env.PATH, HOME: process.env.HOME, BIFORESTING_PSK: PSK }, stdio: ['ignore', out, out] }), `fake ${serverId}`);
 }
@@ -170,10 +179,10 @@ async function api(method, path, body) {
   return { status: res.status, body: json };
 }
 const syncPath = (p = '') => `/v1/biforesting/sync/${GROUP}${p}`;
-const playerPath = (uuid, p = '') => syncPath(`/players/${uuid}${p}`);
+const playerPath = (uuid, p = '', group = GROUP) => `/v1/biforesting/sync/${group}/players/${uuid}${p}`;
 
-async function ledger(uuid) {
-  const r = await api('GET', playerPath(uuid));
+async function ledger(uuid, group = GROUP) {
+  const r = await api('GET', playerPath(uuid, '', group));
   if (r.status === 404) return null;
   assert(r.status === 200, `GET ledger ${uuid}: HTTP ${r.status} ${JSON.stringify(r.body)}`);
   return r.body.data;
@@ -183,19 +192,19 @@ async function startMove(uuid, from, to, name) {
   return api('POST', playerPath(uuid, '/moves'), { from, to, name, reason: 'sync-e2e' });
 }
 
-async function getMove(uuid, moveId, query = '') {
-  const r = await api('GET', playerPath(uuid, `/moves/${moveId}${query}`));
+async function getMove(uuid, moveId, query = '', group = GROUP) {
+  const r = await api('GET', playerPath(uuid, `/moves/${moveId}${query}`, group));
   assert(r.status === 200, `GET move ${moveId}: HTTP ${r.status} ${JSON.stringify(r.body)}`);
   return r.body.data;
 }
 
 /** Long-polls a move until it has an outcome and the runner closed it. */
-async function waitOutcome(uuid, moveId, timeoutMs = 60_000) {
+async function waitOutcome(uuid, moveId, timeoutMs = 60_000, group = GROUP) {
   const until = Date.now() + timeoutMs;
   let move;
   for (;;) {
     try {
-      move = await getMove(uuid, moveId, '?waitMs=10000');
+      move = await getMove(uuid, moveId, '?waitMs=10000', group);
       if (move.outcome !== null) return move;
     } catch (e) {
       if (!(e instanceof TypeError) && !(e instanceof Check)) throw e;
@@ -233,10 +242,14 @@ function fakeOf(serverId) {
     reconnect: (b = {}) => post('reconnect', b),
     restore: (b) => post('restore', b),
     open: (h, key) => post('open', { h, key }),
+    quests: (b) => post('quests', b),
   };
 }
 const fa = fakeOf(A);
 const fb = fakeOf(B);
+const fq1 = fakeOf(Q1);
+const fq2 = fakeOf(Q2);
+const fq3 = fakeOf(Q3);
 
 const stampOf = (dat) => dat?.NeoForgeData?.PlayerPersisted?.biforesting_sync ?? null;
 
@@ -247,17 +260,17 @@ async function waitRegistered(f, granted = true) {
   }, 60_000);
 }
 
-async function joinQuit(f, uuid, name) {
+async function joinQuit(f, uuid, name, group = GROUP) {
   const j = await f.join(uuid, name);
   assert(j.ok, `join ${name} on ${f.id} refused: ${JSON.stringify(j)}`);
   await waitFor(`ledger lastSeen join of ${name} on ${f.id}`, async () => {
-    const d = await ledger(uuid);
+    const d = await ledger(uuid, group);
     return d?.lastSeen?.serverId === f.id && d.lastSeen.event === 'join' ? d : null;
   });
   const q = await f.quit(uuid);
   assert(q.ok, `quit ${name} on ${f.id}: ${JSON.stringify(q)}`);
   return waitFor(`ledger lastSeen quit of ${name} on ${f.id}`, async () => {
-    const d = await ledger(uuid);
+    const d = await ledger(uuid, group);
     return d?.lastSeen?.serverId === f.id && d.lastSeen.event === 'quit' ? d : null;
   });
 }
@@ -332,9 +345,50 @@ async function checkCommitted(p, moveId, v, from = fa, to = fb) {
   }
 }
 
-// ── scenarios ────────────────────────────────────────────────────────────────
+// ── quest progress helpers (group qst) ───────────────────────────────────────
 
 const ctx = {};
+const qPath = (uuid, p = '') => playerPath(uuid, `/quests${p}`, QGROUP);
+
+/** Starts fakes Q1 to Q3 once, grants the policy and sets group qst live with no cooldown. */
+async function ensureQuestGroup() {
+  if (ctx.questGroup) return;
+  for (const s of [Q1, Q2, Q3]) startFake(s);
+  for (const f of [fq1, fq2, fq3]) await waitRegistered(f, false);
+  for (const s of [Q1, Q2, Q3]) {
+    const r = await api('PUT', `/v1/biforesting/${s}/policy`, { features: FEATURES });
+    assert(r.status === 200 && r.body.data?.reAcked === true, `policy ${s}: HTTP ${r.status} ${JSON.stringify(r.body)}`);
+  }
+  for (const f of [fq1, fq2, fq3]) await waitRegistered(f);
+  const g = await api('PUT', `/v1/biforesting/sync/${QGROUP}`, { mode: 'live', cooldownMs: 0 });
+  assert(g.status === 200, `group ${QGROUP} live: HTTP ${g.status} ${JSON.stringify(g.body)}`);
+  ctx.questGroup = true;
+}
+
+let qseq = 0x900;
+/** A player with a .dat on `f` and a ledger doc in group qst. The evol dupe audit never sees it. */
+async function questPlayer(tag, f = fq1) {
+  const p = { uuid: `00000000-0000-4000-9000-${(qseq++).toString(16).padStart(12, '0')}`, name: `Q_${tag}` };
+  await f.seed({ uuid: p.uuid, name: p.name, dat: dat([stack(0, 'minecraft:book', 1)]) });
+  await joinQuit(f, p.uuid, p.name, QGROUP);
+  return p;
+}
+const newTeamId = () => `${(qseq++).toString(16).padStart(8, '0')}-0000-4000-a000-000000000000`;
+
+async function questLease(uuid) {
+  const doc = await mongo.db(DB_NAME).collection('biforesting_sync_players').findOne({ _id: `${QGROUP}:${uuid}` });
+  return doc?.lease ?? null;
+}
+
+async function preActionSnaps(uuid, atLeast) {
+  return waitFor(`${atLeast} pre_action snapshots of ${uuid}`, async () => {
+    const r = await api('GET', playerPath(uuid, '/snapshots?kind=pre_action', QGROUP));
+    return r.body.data?.count >= atLeast ? r.body.data.snapshots : null;
+  });
+}
+
+// ── scenarios ────────────────────────────────────────────────────────────────
+
 
 const scenarios = [
   ['a', 'shadow mode: ledger, shadow syncsnap, shadow-move verdicts', async () => {
@@ -1061,6 +1115,160 @@ const scenarios = [
     }
   }],
 
+  ['u', 'quests: status and each /quests action on the owner, with pre_action snapshots', async () => {
+    await ensureQuestGroup();
+    const p = await questPlayer('actions');
+    const host = '00000000-0000-4000-9000-0000000fffff';
+    await fq1.quests({ teams: { [p.uuid]: { kind: 'player', name: p.name, owner: p.uuid, members: [p.uuid], done: ['q1', 'q2', 'q3'] } } });
+    let r = await api('GET', qPath(p.uuid));
+    eq(r.status, 200, `status: ${JSON.stringify(r.body)}`);
+    const s = r.body.data;
+    eq([s.owner, s.book.kind, s.book.teamId, s.book.owner, s.done, s.pref], [Q1, 'player', p.uuid, null, 3, 'merge'], 'status');
+
+    r = await api('POST', qPath(p.uuid, '/action'), { action: 'pref', value: 'separate' });
+    eq([r.status, r.body.data?.ok], [200, true], `pref: ${JSON.stringify(r.body)}`);
+    eq((await fq1.state()).quests.pref[p.uuid], 'separate', 'pref on Q1');
+    r = await api('POST', qPath(p.uuid, '/action'), { action: 'pref' });
+    eq([r.status, r.body.error?.code], [400, 'bad_value'], 'pref without a value');
+
+    r = await api('POST', qPath(p.uuid, '/action'), { action: 'fresh' });
+    eq([r.status, r.body.data?.ok], [200, true], `fresh: ${JSON.stringify(r.body)}`);
+    const freshId = r.body.data.backupId;
+    eq((await fq1.state()).quests.teams[p.uuid].done, [], 'fresh cleared the book');
+
+    r = await api('POST', qPath(p.uuid, '/action'), { action: 'undo', backupId: freshId });
+    eq([r.status, r.body.data?.ok, r.body.data?.backupId], [200, true, freshId], `undo: ${JSON.stringify(r.body)}`);
+    eq((await fq1.state()).quests.teams[p.uuid].done, ['q1', 'q2', 'q3'], 'undo restored the book');
+    r = await api('POST', qPath(p.uuid, '/action'), { action: 'undo', backupId: freshId });
+    eq([r.status, r.body.data?.ok, r.body.data?.code], [200, false, 'already_undone'], 'a second undo of one backup');
+
+    const party = newTeamId();
+    await fq1.quests({ teams: { [party]: { kind: 'party', name: 'Club', owner: host, members: [host, p.uuid], done: ['q4', 'q5'] } } });
+    r = await api('GET', qPath(p.uuid));
+    eq([r.body.data?.book?.kind, r.body.data?.book?.teamId, r.body.data?.book?.owner], ['party', party, host], 'status in a party');
+    r = await api('POST', qPath(p.uuid, '/action'), { action: 'fresh' });
+    eq([r.status, r.body.data?.ok, r.body.data?.code], [200, false, 'in_party'], 'fresh in a party');
+    r = await api('POST', qPath(p.uuid, '/action'), { action: 'leave' });
+    eq([r.status, r.body.data?.ok], [200, true], `leave: ${JSON.stringify(r.body)}`);
+    const st = await fq1.state();
+    assert(!st.quests.teams[party].members.includes(p.uuid), 'still a party member after leave');
+    eq(st.quests.teams[p.uuid].done, ['q1', 'q2', 'q3', 'q4', 'q5'], 'leave merged the party book into the player team');
+
+    const snaps = await preActionSnaps(p.uuid, 3);
+    eq(snaps.map((x) => x.header.action).sort(), ['fresh', 'leave', 'undo'], 'one pre_action snapshot per write');
+    assert(snaps.some((x) => x.header.action === 'fresh' && x.header.backupId === freshId), 'the fresh snapshot names its backup');
+    eq(await questLease(p.uuid), null, 'no quest lock is left');
+  }],
+  ['v', 'quests: party candidates fan out to the other members; one member down gives a partial answer', async () => {
+    await ensureQuestGroup();
+    const p = await questPlayer('cand');
+    const t2 = newTeamId();
+    const t3 = newTeamId();
+    await fq2.quests({ teams: { [t2]: { kind: 'party', name: 'Two', owner: p.uuid, members: [p.uuid], done: ['a', 'b'] } } });
+    await fq3.quests({ teams: { [t3]: { kind: 'party', name: 'Three', owner: p.uuid, members: [p.uuid], done: ['c'] } } });
+    let r = await api('GET', qPath(p.uuid, '/party-candidates'));
+    eq(r.status, 200, `candidates: ${JSON.stringify(r.body)}`);
+    eq(r.body.data.parties.map((x) => [x.serverId, x.teamId, x.done]).sort(), [[Q2, t2, 2], [Q3, t3, 1]], 'both parties');
+    eq([r.body.data.partial, r.body.data.offline], [false, []], 'every member answered');
+
+    await fq3.disconnect({ holdDown: true });
+    try {
+      await waitFor('Q3 link down', async () => {
+        const g = await api('GET', `/v1/biforesting/sync/${QGROUP}`);
+        return g.body.data?.instances?.find((i) => i.serverId === Q3)?.live === false;
+      });
+      const started = Date.now();
+      r = await api('GET', qPath(p.uuid, '/party-candidates'));
+      eq(r.status, 200, `candidates with Q3 down: ${JSON.stringify(r.body)}`);
+      eq(r.body.data.parties.map((x) => [x.serverId, x.teamId]), [[Q2, t2]], 'Q2 still answers');
+      eq([r.body.data.partial, r.body.data.offline], [true, [Q3]], 'Q3 is listed offline');
+      assert(Date.now() - started < 5_000, 'a member that is down does not hold the answer');
+    } finally {
+      await fq3.reconnect();
+      await waitRegistered(fq3);
+    }
+  }],
+  ['w', 'quests: a party merge from another instance runs once; the same pair is refused twice', async () => {
+    await ensureQuestGroup();
+    const p = await questPlayer('merge');
+    const friend = '00000000-0000-4000-9000-0000000ffffe';
+    const target = newTeamId();
+    const source = newTeamId();
+    await fq1.quests({ teams: { [target]: { kind: 'party', name: 'Home', owner: p.uuid, members: [p.uuid, friend], done: ['a', 'b'] } } });
+    await fq2.quests({ teams: { [source]: { kind: 'party', name: 'Away', owner: friend, members: [friend, p.uuid], done: ['b', 'c', 'd'] } } });
+    let r = await api('POST', qPath(p.uuid, '/party-merge'), { fromServer: Q2, teamId: source });
+    eq([r.status, r.body.data?.ok, r.body.data?.merge?.state], [200, true, 'done'], `merge: ${JSON.stringify(r.body)}`);
+    const backupId = r.body.data.backupId;
+    eq((await fq1.state()).quests.teams[target].done, ['a', 'b', 'c', 'd'], 'the source book merged into the party');
+    const doc = await mongo.db(DB_NAME).collection('biforesting_sync_quest_merges').findOne({ _id: `${QGROUP}:${Q2}:${source}:${Q1}:${target}` });
+    eq([doc?.state, doc?.backupId], ['done', backupId], 'the merge doc');
+
+    for (let i = 1; i <= 2; i++) {
+      r = await api('POST', qPath(p.uuid, '/party-merge'), { fromServer: Q2, teamId: source });
+      eq([r.status, r.body.error?.code], [409, 'already_merged'], `merge again (${i})`);
+    }
+    eq((await fq1.state()).quests.imports.filter((x) => x.uuid === p.uuid).length, 1, 'one import on Q1');
+    r = await api('GET', qPath(p.uuid, '/party-candidates'));
+    const cand = r.body.data?.parties?.find((x) => x.teamId === source);
+    eq(cand?.mergedInto?.map((m) => [m.targetServerId, m.targetTeamId]), [[Q1, target]], 'the candidate lists the merge');
+    const snaps = await preActionSnaps(p.uuid, 1);
+    assert(snaps.some((x) => x.header.action === 'party_merge' && x.header.backupId === backupId), 'pre_action snapshot of the merge');
+    eq(await questLease(p.uuid), null, 'no quest lock is left');
+  }],
+  ['x', 'quests: an action during a move gets 409 moving; a move during an action gets 409 moving', async () => {
+    await ensureQuestGroup();
+    const p = await questPlayer('move');
+    try {
+      await fq1.fault({ delayMs: { sync_prepare: 2_500 } });
+      let r = await api('POST', playerPath(p.uuid, '/moves', QGROUP), { from: Q1, to: Q2, name: p.name, reason: 'sync-e2e' });
+      eq(r.status, 201, `move: ${JSON.stringify(r.body)}`);
+      const moveId = r.body.data.move.id;
+      r = await api('POST', qPath(p.uuid, '/action'), { action: 'fresh' });
+      eq([r.status, r.body.error?.code], [409, 'moving'], 'an action during the move');
+      r = await api('GET', qPath(p.uuid));
+      eq([r.status, r.body.error?.code], [409, 'moving'], 'status during the move');
+      r = await api('POST', qPath(p.uuid, '/party-merge'), { fromServer: Q3, teamId: newTeamId() });
+      eq([r.status, r.body.error?.code], [409, 'moving'], 'a party merge during the move');
+      eq(
+        (await fq1.state()).opsSeen.filter((o) => o.uuid === p.uuid && o.type.startsWith('quests_')).length,
+        0,
+        'no quest op reached Q1 during the move',
+      );
+      const done = await waitOutcome(p.uuid, moveId, 60_000, QGROUP);
+      eq([done.outcome, done.owner], ['committed', Q2], 'the move commits');
+      await waitMoveDone(moveId);
+
+      r = await api('GET', qPath(p.uuid));
+      eq([r.status, r.body.data?.owner], [200, Q2], 'status now goes to Q2');
+      await fq2.fault({ delayMs: { quests_action: 2_500 } });
+      const pending = api('POST', qPath(p.uuid, '/action'), { action: 'pref', value: 'merge' });
+      await waitFor('quest lock on the ledger', async () => (await questLease(p.uuid))?.holder?.startsWith('quests:'));
+      r = await api('POST', playerPath(p.uuid, '/moves', QGROUP), { from: Q2, to: Q1, name: p.name, reason: 'sync-e2e' });
+      eq([r.status, r.body.error?.code], [409, 'moving'], `a move during the action: ${JSON.stringify(r.body)}`);
+      const a = await pending;
+      eq([a.status, a.body.data?.ok], [200, true], `the action: ${JSON.stringify(a.body)}`);
+      eq(await questLease(p.uuid), null, 'the lock is gone after the answer');
+    } finally {
+      await fq1.fault({ reset: true });
+      await fq2.fault({ reset: true });
+    }
+  }],
+  ['y', 'quests: a mod without the quest ops answers unsupported_op; the calls end at once with not_ready', async () => {
+    await ensureQuestGroup();
+    const p = await questPlayer('oldjar');
+    try {
+      await fq1.fault({ answerCode: { quests_status: { code: 'unsupported_op' }, quests_action: { code: 'unsupported_op' } } });
+      const started = Date.now();
+      let r = await api('GET', qPath(p.uuid));
+      eq([r.status, r.body.error?.code], [409, 'not_ready'], `status: ${JSON.stringify(r.body)}`);
+      r = await api('POST', qPath(p.uuid, '/action'), { action: 'fresh' });
+      eq([r.status, r.body.error?.code], [409, 'not_ready'], `action: ${JSON.stringify(r.body)}`);
+      assert(Date.now() - started < 5_000, 'both answer at once');
+      eq(await questLease(p.uuid), null, 'no quest lock is left');
+    } finally {
+      await fq1.fault({ reset: true });
+    }
+  }],
   ['l', 'dupe audit', async () => {
     const sa = await fa.state();
     const sb = await fb.state();
@@ -1113,6 +1321,9 @@ async function main() {
     { tag: 'evol', serverId: A, name: 'Evolution 1', group: GROUP, instanceNumber: 1 },
     { tag: 'evol', serverId: B, name: 'Evolution 2', group: GROUP, instanceNumber: 2 },
     { tag: 'solo', serverId: C, name: 'Solo', instanceNumber: 1 },
+    { tag: QGROUP, serverId: Q1, name: 'Quests 1', group: QGROUP, instanceNumber: 1 },
+    { tag: QGROUP, serverId: Q2, name: 'Quests 2', group: QGROUP, instanceNumber: 2 },
+    { tag: QGROUP, serverId: Q3, name: 'Quests 3', group: QGROUP, instanceNumber: 3 },
   ]);
   log(`mongod on ${MONGO_PORT}, servers seeded`);
 

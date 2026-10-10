@@ -267,17 +267,43 @@ test('groups: get serves a cached doc for 5 s; an upsert through the store repla
   assert.equal((await cached.get('cachegrp')).mode, 'off', 'callers get a copy');
 });
 
-test('snapshots: pre_sync keeps 10 with a 180-day expireAt; rings are per kind', async () => {
+test('snapshots: pre_sync keeps every one younger than 30 days, with a 180-day expireAt; rings are per kind', async () => {
   const u = uuid();
   await snapshots.insert({ group: 'evol', serverId: 'srv-a', header: header(u, 'shadow', 0), gz: Buffer.from([0]) });
   for (let v = 1; v <= 12; v++) {
     await snapshots.insert({ group: 'evol', serverId: 'srv-b', header: header(u, 'pre_sync', v, { moveId: `m${v}` }), gz: Buffer.from([v]) });
   }
   const pre = await snapshots.list('evol', u, 'pre_sync');
-  assert.equal(pre.length, 10);
-  assert.equal(pre.at(-1)?.v, 3);
+  assert.equal(pre.length, 12, 'none is older than 30 days');
   assert.equal(pre[0]!.expireAt!.getTime() - pre[0]!.createdAt.getTime(), 180 * DAY);
   assert.equal((await snapshots.list('evol', u, 'shadow')).length, 1, 'the shadow ring is untouched');
+
+  // Age the 4 oldest past 30 days. The next insert trims the aged ones beyond the newest 10.
+  const col = db.collection('biforesting_sync_snapshots');
+  const old = new Date(Date.now() - 31 * DAY);
+  for (const s of pre.slice(-4)) await col.updateOne({ _id: s._id } as never, { $set: { createdAt: old } });
+  await snapshots.insert({ group: 'evol', serverId: 'srv-b', header: header(u, 'pre_sync', 13, { moveId: 'm13' }), gz: Buffer.from([13]) });
+  const after = await snapshots.list('evol', u, 'pre_sync');
+  assert.deepEqual(after.map((s) => s.v), [13, 12, 11, 10, 9, 8, 7, 6, 5, 4], 'the newest 10 stay, aged ones beyond them go');
+});
+
+test('snapshots: pre_action keys on the backupId, keeps 30 days and at most 200', async () => {
+  const u = uuid();
+  const h = header(u, 'pre_action', 3, { group: 'evol', action: 'fresh', backupId: '20261010T193000Z-fresh', at: 1_760_000_000_000 });
+  const first = await snapshots.insert({ group: 'evol', serverId: 'srv-a', header: h, gz: Buffer.from([1]) });
+  assert.equal(first.snapshot._id, `evol:${u}:3:pre_action:srv-a:20261010T193000Z-fresh:${'a'.repeat(12)}`);
+  assert.equal(first.snapshot.expireAt!.getTime() - first.snapshot.createdAt.getTime(), 180 * DAY);
+  assert.equal((await snapshots.insert({ group: 'evol', serverId: 'srv-a', header: h, gz: Buffer.from([1]) })).duplicate, true);
+  const noBackup = await snapshots.insert({ group: 'evol', serverId: 'srv-a', header: header(u, 'pre_action', 3, { at: 1_760_000_000_001 }), gz: Buffer.from([2]) });
+  assert.equal(noBackup.snapshot._id, `evol:${u}:3:pre_action:srv-a:1760000000001:${'a'.repeat(12)}`, 'no backupId: the header time');
+
+  assert.equal(SNAPSHOT_RETENTION.pre_action.max, 200);
+  for (let i = 0; i < 200; i++) {
+    await snapshots.insert({ group: 'evol', serverId: 'srv-a', header: header(u, 'pre_action', 3, { backupId: `b-${i}` }), gz: Buffer.from([i % 256]) });
+  }
+  const all = await snapshots.list('evol', u, 'pre_action');
+  assert.equal(all.length, 200, 'the cap holds even inside 30 days');
+  assert.equal(all[0]!.header.backupId, 'b-199');
 });
 
 test('snapshots: release keeps 10, never the one at the ledger version, and has no expireAt', async () => {

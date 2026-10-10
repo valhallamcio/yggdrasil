@@ -7,6 +7,8 @@ import { serverResolver } from './server-resolver.js';
 import { SyncGroupsStore } from './sync-groups-store.js';
 import { SyncLedgerStore } from './sync-ledger-store.js';
 import { SyncMovesStore } from './sync-moves-store.js';
+import { SyncQuestMergesStore } from './sync-quest-merges-store.js';
+import { SyncQuests } from './sync-quests.js';
 import { SyncRunner, type SyncRunnerDirectory } from './sync-runner.js';
 import { SyncShadowStore } from './sync-shadow-store.js';
 import { SyncSnapshotStore } from './sync-snapshot-store.js';
@@ -26,6 +28,7 @@ export const syncSnapshotStore = new SyncSnapshotStore(db, syncLedgerStore);
 export const syncShadowStore = new SyncShadowStore(db);
 export const syncMovesStore = new SyncMovesStore(db);
 export const syncWorldDataStore = new SyncWorldDataStore(db);
+export const syncQuestMergesStore = new SyncQuestMergesStore(db);
 
 const links: SyncLinkPort = {
   instance: async (serverId) => {
@@ -58,6 +61,14 @@ export const syncRunner = new SyncRunner({
   links,
 });
 
+export const syncQuests = new SyncQuests({
+  stores: { groups: syncGroupsStore, ledger: syncLedgerStore, merges: syncQuestMergesStore },
+  ops: opsStore,
+  dispatch: opDispatcher,
+  directory,
+  links,
+});
+
 export const syncService = new SyncService(
   { groups: syncGroupsStore, ledger: syncLedgerStore, snapshots: syncSnapshotStore, shadow: syncShadowStore },
   serverResolver,
@@ -72,18 +83,21 @@ export async function ensureSyncIndexes(): Promise<void> {
   await syncShadowStore.ensureIndexes();
   await syncMovesStore.ensureIndexes();
   await syncWorldDataStore.ensureIndexes();
+  await syncQuestMergesStore.ensureIndexes();
 }
 
 let hooked = false;
 
 /**
- * Feeds op updates to the move runner, gives the dispatcher the `sync_apply` blob source and
+ * Feeds op updates to the move runner and to the quest calls that wait for an op result, gives
+ * the dispatcher the `sync_apply` blob source and
  * starts the sweep and lease timers. With every group `off` the runner does no Mongo work after
  * its first sweep.
  */
 export function startSyncRunner(): void {
   if (!hooked) {
     addOpUpdateHook((op) => syncRunner.onOpUpdate(op));
+    addOpUpdateHook((op) => syncQuests.onOpUpdate(op));
     opDispatcher.setSyncSnapshots(syncSnapshotStore);
     hooked = true;
   }

@@ -1,4 +1,6 @@
-import { Router } from 'express';
+import { Router, type RequestHandler } from 'express';
+import type { ZodSchema } from 'zod';
+import { AppError } from '../../shared/errors/index.js';
 import { SyncController } from './sync.controller.js';
 import { validate } from '../../middleware/validate.js';
 import { apiKeyAuth } from '../../middleware/auth/api-key.js';
@@ -13,6 +15,8 @@ import {
   syncMoveStartBodySchema,
   syncMoveWaitQuerySchema,
   syncPlayerParamsSchema,
+  syncQuestActionBodySchema,
+  syncQuestMergeBodySchema,
   syncReseedBodySchema,
   syncSnapshotIdParamsSchema,
   syncSnapshotListQuerySchema,
@@ -100,6 +104,51 @@ syncRouter.post(
   apiKeyAuth(),
   validate({ params: syncMoveParamsSchema }),
   asyncHandler(controller.cancelMove),
+);
+
+// ── Quest progress (phase6 DESIGN 4 and 7) ───────────────────────────────────
+
+/** A bad quest body is a 400 with code `bad_value` (the code Bifrost names, contract-notes-bifrost.md). */
+function validateQuestBody(schema: ZodSchema): RequestHandler {
+  return (req, _res, next): void => {
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      next(new AppError('Request validation failed', 400, 'bad_value', { body: parsed.error.flatten().fieldErrors }));
+      return;
+    }
+    req.body = parsed.data;
+    next();
+  };
+}
+
+syncRouter.get(
+  '/:group/players/:uuid/quests',
+  apiKeyAuth(),
+  validate({ params: syncPlayerParamsSchema }),
+  asyncHandler(controller.getQuests),
+);
+
+syncRouter.post(
+  '/:group/players/:uuid/quests/action',
+  apiKeyAuth(),
+  validate({ params: syncPlayerParamsSchema }),
+  validateQuestBody(syncQuestActionBodySchema),
+  asyncHandler(controller.postQuestAction),
+);
+
+syncRouter.get(
+  '/:group/players/:uuid/quests/party-candidates',
+  apiKeyAuth(),
+  validate({ params: syncPlayerParamsSchema }),
+  asyncHandler(controller.getQuestCandidates),
+);
+
+syncRouter.post(
+  '/:group/players/:uuid/quests/party-merge',
+  apiKeyAuth(),
+  validate({ params: syncPlayerParamsSchema }),
+  validateQuestBody(syncQuestMergeBodySchema),
+  asyncHandler(controller.postQuestMerge),
 );
 
 syncRouter.post(

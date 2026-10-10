@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { UUID_RE } from '../../plugins/biforesting-link/decoders.js';
 import { SYNC_MODES } from '../../plugins/biforesting-link/sync-groups-store.js';
 import { MOVE_STEPS } from '../../plugins/biforesting-link/sync-moves-store.js';
+import { questActionFields, questActionRule } from './ops-catalog.js';
 
 /** Player sync REST (bifrost-lib `docs/invariants/player-sync.md` section 7). */
 
@@ -35,8 +36,14 @@ export const shadowMoveBodySchema = z
   .refine((b) => b.from !== b.to, { message: 'from and to must be different instances' });
 
 export const syncSnapshotListQuerySchema = z.object({
-  kind: z.enum(['shadow', 'release', 'pre_sync']).optional(),
+  kind: z.enum(['shadow', 'release', 'pre_sync', 'pre_action']).optional(),
 });
+
+/** POST .../quests/action. The op goes to the owner instance (phase6 DESIGN 4 and 7). */
+export const syncQuestActionBodySchema = z.object(questActionFields).strict().superRefine(questActionRule);
+
+/** POST .../quests/party-merge. `fromServer` holds the party `teamId`; the owner instance imports it. */
+export const syncQuestMergeBodySchema = z.object({ fromServer: serverId, teamId: playerUuid }).strict();
 
 /** `<group>:<uuid>:<v>:<kind>:<serverId>`. */
 export const syncSnapshotIdParamsSchema = z.object({
@@ -90,3 +97,5 @@ export type SyncGroupPutBody = z.infer<typeof syncGroupPutBodySchema>;
 export type ShadowMoveBody = z.infer<typeof shadowMoveBodySchema>;
 export type SyncSnapshotListQuery = z.infer<typeof syncSnapshotListQuerySchema>;
 export type SyncSnapshotIdParams = z.infer<typeof syncSnapshotIdParamsSchema>;
+export type SyncQuestActionBody = z.infer<typeof syncQuestActionBodySchema>;
+export type SyncQuestMergeBody = z.infer<typeof syncQuestMergeBodySchema>;

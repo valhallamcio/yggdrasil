@@ -85,6 +85,17 @@ export function ledgerId(group: string, uuid: string): string {
   return `${group}:${uuid.toLowerCase()}`;
 }
 
+/**
+ * Lease holder prefix of a quest lock (phase6 DESIGN 4 and 7). A quest action or a party merge
+ * holds the lease of an `online` doc while its ops run, so no move starts in that time.
+ */
+export const QUEST_LOCK_PREFIX = 'quests:';
+
+/** True when a quest action or a party merge holds the doc at `now`. */
+export function questLockHeld(doc: Pick<SyncPlayerDoc, 'lease'>, now: number): boolean {
+  return !!doc.lease && doc.lease.holder.startsWith(QUEST_LOCK_PREFIX) && doc.lease.until.getTime() > now;
+}
+
 /** A presence stamp with the spec 3.3 shape, or null. */
 export function toSyncStamp(raw: unknown): SyncStamp | null {
   if (typeof raw !== 'object' || raw === null) return null;
@@ -178,6 +189,28 @@ export class SyncLedgerStore {
     }
     const withStamp: UpdateFilter<SyncPlayerDoc> = { ...update, $set: { ...update.$set, updatedAt: new Date(this.now()) } };
     return this.col().findOneAndUpdate(q as Filter<SyncPlayerDoc>, withStamp, { returnDocument: 'after' });
+  }
+
+  /**
+   * Takes the quest lock: the lease of an `online` doc with no move, owned by `owner`, whose lease
+   * is free or lapsed at `now`. Null when the guard did not match. Move starts and force-releases
+   * CAS on a free lease, so they fail while the lock holds.
+   */
+  async takeQuestLock(group: string, uuid: string, owner: string, holder: string, now: Date, until: Date): Promise<SyncPlayerDoc | null> {
+    return this.col().findOneAndUpdate(
+      { _id: ledgerId(group, uuid), state: 'online', move: null, owner, $or: [{ lease: null }, { 'lease.until': { $lt: now } }] },
+      { $set: { lease: { holder, until }, updatedAt: new Date(this.now()) } },
+      { returnDocument: 'after' },
+    );
+  }
+
+  /** Frees a lease that `holder` still holds. False when another holder took it, or none holds it. */
+  async releaseLease(group: string, uuid: string, holder: string): Promise<boolean> {
+    const res = await this.col().updateOne(
+      { _id: ledgerId(group, uuid), 'lease.holder': holder },
+      { $set: { lease: null, updatedAt: new Date(this.now()) } },
+    );
+    return res.modifiedCount > 0;
   }
 
   /** Docs with an open move whose lease is free or lapsed at `now` (the runner sweep). */

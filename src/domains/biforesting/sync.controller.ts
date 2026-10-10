@@ -1,6 +1,6 @@
 import type { Request, Response } from 'express';
 import { logger } from '../../core/logger/index.js';
-import { syncGroupsStore, syncLedgerStore, syncRunner, syncService, syncSnapshotStore } from '../../plugins/biforesting-link/sync-runtime.js';
+import { syncGroupsStore, syncLedgerStore, syncQuests, syncRunner, syncService, syncSnapshotStore } from '../../plugins/biforesting-link/sync-runtime.js';
 import { groupView } from '../../plugins/biforesting-link/sync-service.js';
 import { NotFoundError } from '../../shared/errors/index.js';
 import { binaryToBuffer } from './biforesting.controller.js';
@@ -14,6 +14,8 @@ import type {
   SyncMoveStartBody,
   SyncMoveWaitQuery,
   SyncPlayerParams,
+  SyncQuestActionBody,
+  SyncQuestMergeBody,
   SyncReseedBody,
   SyncSnapshotIdParams,
   SyncSnapshotListQuery,
@@ -128,6 +130,34 @@ export class SyncController {
     const { kind } = req.query as unknown as SyncSnapshotListQuery;
     const snapshots = await syncSnapshotStore.list(group, uuid, kind);
     res.json({ data: { group, uuid, count: snapshots.length, snapshots } });
+  };
+
+  // ── Quest progress (phase6 DESIGN 4 and 7) ─────────────────────────────────
+
+  /** `quests_status` on the owner instance. */
+  getQuests = async (req: Request, res: Response): Promise<void> => {
+    const { group, uuid } = req.params as unknown as SyncPlayerParams;
+    res.json({ data: await syncQuests.status(group, uuid, actorOf(req)) });
+  };
+
+  /** One `/quests` menu action on the owner instance. 409 `moving` during a move. */
+  postQuestAction = async (req: Request, res: Response): Promise<void> => {
+    const { group, uuid } = req.params as unknown as SyncPlayerParams;
+    const body = req.body as SyncQuestActionBody;
+    res.json({ data: await syncQuests.action(group, uuid, body, actorOf(req)) });
+  };
+
+  /** The parties on the other instances that hold the player. Partial when a member is down. */
+  getQuestCandidates = async (req: Request, res: Response): Promise<void> => {
+    const { group, uuid } = req.params as unknown as SyncPlayerParams;
+    res.json({ data: await syncQuests.partyCandidates(group, uuid, actorOf(req)) });
+  };
+
+  /** Export a party from `fromServer`, import it on the owner instance. One merge per pair. */
+  postQuestMerge = async (req: Request, res: Response): Promise<void> => {
+    const { group, uuid } = req.params as unknown as SyncPlayerParams;
+    const body = req.body as SyncQuestMergeBody;
+    res.json({ data: await syncQuests.partyMerge(group, uuid, body, actorOf(req)) });
   };
 
   /** One snapshot with its gz blob as base64. */

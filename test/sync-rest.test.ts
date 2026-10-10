@@ -15,10 +15,12 @@ import {
   syncMoveStartBodySchema,
   syncMoveWaitQuerySchema,
   syncPlayerParamsSchema,
+  syncQuestActionBodySchema,
+  syncQuestMergeBodySchema,
   syncReseedBodySchema,
   syncSnapshotListQuerySchema,
 } from '../src/domains/biforesting/sync.schema.ts';
-import { OPS_CATALOG } from '../src/domains/biforesting/ops-catalog.ts';
+import { OPS_CATALOG, QUEST_RECORD_MAX_CHARS } from '../src/domains/biforesting/ops-catalog.ts';
 import { BiforestingController } from '../src/domains/biforesting/biforesting.controller.ts';
 import { ValidationError } from '../src/shared/errors/index.ts';
 
@@ -164,9 +166,61 @@ test('ops catalog: every sync op needs player_sync and is internal', () => {
   assert.equal(lock.params.safeParse({ group: 'evol', entries: [{ h: 'sb', key: 'k', to: '', toLabel: '', u: 'x' }] }).success, false, 'an entry is {h, key, to, toLabel} only');
 });
 
+test('quest schemas: action body rules, party-merge body, pre_action snapshot kind', () => {
+  const ok = (b: unknown): boolean => syncQuestActionBodySchema.safeParse(b).success;
+  assert.equal(ok({ action: 'pref', value: 'separate' }), true);
+  assert.equal(ok({ action: 'pref' }), false, 'pref needs a value');
+  assert.equal(ok({ action: 'pref', value: 'both' }), false, 'unknown pref');
+  assert.equal(ok({ action: 'fresh' }), true);
+  assert.equal(ok({ action: 'fresh', value: 'merge' }), false, 'fresh takes no value');
+  assert.equal(ok({ action: 'leave', backupId: 'x' }), false, 'only undo takes a backupId');
+  assert.equal(ok({ action: 'undo' }), true);
+  assert.equal(ok({ action: 'undo', backupId: '20261010T193000Z-fresh' }), true);
+  assert.equal(ok({ action: 'undo', backupId: '../x' }), false, 'no path in a backupId');
+  assert.equal(ok({ action: 'undo', backupId: '..' }), false);
+  assert.equal(ok({ action: 'reset' }), false, 'unknown action');
+  assert.equal(ok({ action: 'fresh', uuid: 'x' }), false, 'unknown field');
+
+  const merge = syncQuestMergeBodySchema.parse({ fromServer: '1ae705e3', teamId: '6F9D029B-0000-4000-8000-000000000001' });
+  assert.equal(merge.teamId, '6f9d029b-0000-4000-8000-000000000001');
+  assert.equal(syncQuestMergeBodySchema.safeParse({ fromServer: '1ae705e3', teamId: 'Max_Automation' }).success, false);
+  assert.equal(syncQuestMergeBodySchema.safeParse({ fromServer: '1ae705e3', teamId: merge.teamId, toServer: 'x' }).success, false);
+
+  assert.equal(syncSnapshotListQuerySchema.safeParse({ kind: 'pre_action' }).success, true);
+});
+
+test('ops catalog: quest ops need player_sync, are internal and strict', () => {
+  const U = '0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9';
+  const T = '6f9d029b-0000-4000-8000-000000000001';
+  for (const type of ['quests_status', 'quests_action', 'quests_party_candidates', 'quests_export_party', 'quests_import_party']) {
+    const entry = OPS_CATALOG[type];
+    assert.ok(entry, type);
+    assert.equal(entry.requiresFeature, 'player_sync', type);
+    assert.equal(entry.internal, true, type);
+  }
+  const p = (type: string, params: unknown): boolean => OPS_CATALOG[type]!.params.safeParse(params).success;
+  assert.equal(p('quests_status', { group: 'evol', uuid: U }), true);
+  assert.equal(p('quests_status', { group: 'evol', uuid: U, extra: 1 }), false, 'strict');
+  assert.equal(p('quests_status', { group: 'evol', uuid: 'Steve' }), false);
+  assert.equal(p('quests_action', { group: 'evol', uuid: U, action: 'pref', value: 'merge' }), true);
+  assert.equal(p('quests_action', { group: 'evol', uuid: U, action: 'pref' }), false);
+  assert.equal(p('quests_action', { group: 'evol', uuid: U, action: 'undo', backupId: 'b-1' }), true);
+  assert.equal(p('quests_party_candidates', { group: 'evol', uuid: U }), true);
+  assert.equal(OPS_CATALOG['quests_export_party']!.serverGlobal, true, 'export names a team, no player');
+  assert.equal(p('quests_export_party', { group: 'evol', teamId: T }), true);
+  assert.equal(p('quests_export_party', { group: 'evol', teamId: T, uuid: U }), false);
+  const imp = { group: 'evol', uuid: U, record: { teamId: T, done: ['a'] }, sourceServerId: '1ae705e3', sourceTeamId: T };
+  assert.equal(p('quests_import_party', imp), true);
+  assert.equal(p('quests_import_party', { ...imp, record: 'H4sIAAAA' }), true, 'a string record passes as is');
+  assert.equal(p('quests_import_party', { ...imp, record: null }), false);
+  assert.equal(p('quests_import_party', { ...imp, record: [] }), false, 'a record is an object or a string');
+  assert.equal(p('quests_import_party', { ...imp, record: { big: 'x'.repeat(QUEST_RECORD_MAX_CHARS) } }), false, 'over the record cap');
+  assert.equal(p('quests_import_party', { ...imp, sourceServerId: '' }), false);
+});
+
 test('generic op route: sync op types are refused with a 400', async () => {
   const controller = new BiforestingController();
-  for (const type of ['sync_apply', 'sync_disown', 'sync_kick', 'sync_own', 'sync_lock']) {
+  for (const type of ['sync_apply', 'sync_disown', 'sync_kick', 'sync_own', 'sync_lock', 'quests_action', 'quests_import_party']) {
     const req = { params: { server: 'evol' }, body: { type, params: {} }, headers: {} } as unknown as Request;
     await assert.rejects(
       controller.createOp(req, {} as Response),

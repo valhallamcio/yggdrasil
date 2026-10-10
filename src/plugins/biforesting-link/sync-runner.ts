@@ -7,7 +7,15 @@ import { AppError, NotFoundError } from '../../shared/errors/index.js';
 import { catalogEntry, SYNC_DISOWN_MAX_ENTRIES, SYNC_LOCK_MAX_ENTRIES, SYNC_OWN_MAX_ENTRIES } from '../../domains/biforesting/ops-catalog.js';
 import { FEATURE_BITS } from './policy-store.js';
 import { ulid } from './ulid.js';
-import { ledgerId, toSyncStamp, type PresenceEvent, type SyncLedgerStore, type SyncPlayerDoc, type SyncPlayerState } from './sync-ledger-store.js';
+import {
+  ledgerId,
+  questLockHeld,
+  toSyncStamp,
+  type PresenceEvent,
+  type SyncLedgerStore,
+  type SyncPlayerDoc,
+  type SyncPlayerState,
+} from './sync-ledger-store.js';
 import { syncSnapshotId, type SyncSnapshotMeta, type SyncSnapshotStore } from './sync-snapshot-store.js';
 import {
   type MoveCode,
@@ -116,6 +124,7 @@ export const SYNC_MESSAGES = {
   moving: 'Your character is moving to another instance. Join again in a few seconds.',
   busy: 'Your character is already moving. Try again in a few seconds.',
   staff: 'Staff are moving your character. Join again in a minute.',
+  questsBusy: 'Your quest book is being changed right now. Try again in a few seconds.',
 } as const;
 
 /** A refused move start. The body is `{error: {code, message, details}}`; Bifrost shows `message`. */
@@ -638,6 +647,9 @@ export class SyncRunner implements SyncLiveHooks {
       const message = doc?.owner ? `This character is on ${label(doc.owner)}.` : 'This character is on no instance yet. Join an instance first.';
       throw new SyncConflictError('not_owner', message, { owner: doc?.owner ?? null });
     }
+    // A quest action or a party merge runs for this player. The CAS below would fail on its
+    // lease too; this check only gives the player the right reason.
+    if (questLockHeld(doc, this.now())) throw new SyncConflictError('moving', SYNC_MESSAGES.questsBusy, { questLock: true });
 
     const last = input.skipCooldown ? null : await moves.latestCommitted(group, uuid);
     if (last?.endedAt) {
