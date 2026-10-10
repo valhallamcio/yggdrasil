@@ -64,7 +64,9 @@
  *                                   player team (team id = uuid) on first use.
  * Quest ops (phase6 DESIGN 4 and 7): quests_status, quests_action (pref, fresh, leave, undo),
  * quests_party_candidates, quests_export_party and quests_import_party run on the same op chain as
- * the sync ops. A move mark refuses them with code move_mark. Every write backs up the book first:
+ * the sync ops. A move mark refuses them with code move_mark. quests_export_party sends the party
+ * record up as a `party_export` syncsnap and answers its sha256; quests_import_party reads the
+ * record from the op blob and checks that sha256 (spec 10.8). Every write backs up the book first:
  * a local backup (listed by quests_status) and a `pre_action` syncsnap with its backupId. A mod
  * build without these ops is the fault answerCode {quests_<op>: {code: 'unsupported_op'}}.
  * Fault flags (counts are "times left"; a missing count means every time):
@@ -690,7 +692,7 @@ function sendSyncSnap(kind, uuid, extra, root, report) {
   const header = {
     kind,
     uuid,
-    name: sync.names[uuid] ?? '',
+    name: extra.name ?? sync.names[uuid] ?? '',
     v: extra.v ?? 0,
     ...(extra.group ? { group: extra.group } : {}),
     ...(extra.moveId ? { moveId: extra.moveId } : {}),
@@ -1015,20 +1017,31 @@ const handlers = {
     const teamId = String(op.params.teamId).toLowerCase();
     const t = sync.quests.teams[teamId];
     if (!t || t.kind !== 'party') return fail('party_gone', `no party ${teamId} here`);
-    return ok({ record: { teamId, name: t.name, members: [...t.members], done: [...t.done], bookHash: 'fake-book' } });
+    const record = { teamId, name: t.name, members: [...t.members], done: [...t.done], bookHash: 'fake-book' };
+    const gzLen = gzipSync(Buffer.from(stableJson(record), 'utf8')).length;
+    if (gzLen > MAX_BLOB_BYTES) return fail('too_large', `the party record is ${gzLen} gz bytes, over maxBlobBytes`);
+    const snap = sendSyncSnap('party_export', teamId, { v: 0, group: op.params.group, name: t.name }, record, null);
+    if (!snap.sent) return fail('not_applied', 'the link refused the party export');
+    return ok({ sha256: snap.sha256, gzLen: snap.gzLen, teamId, members: questMembers(t) });
   },
 
-  quests_import_party(op, uuid) {
+  quests_import_party(op, uuid, blob) {
     const refused = questMoveMark(uuid);
     if (refused) return refused;
     const [teamId, t] = questBook(uuid);
     if (t.kind !== 'party') return ok({ ok: false, code: 'not_in_party' });
     if (t.owner !== uuid) return ok({ ok: false, code: 'not_party_owner' });
     if (teamId === String(op.params.sourceTeamId).toLowerCase()) return ok({ ok: false, code: 'same_team' });
-    const rec = op.params.record;
+    if (!blob || sha256hex(blob) !== op.params.sha256) return ok({ ok: false, code: 'bad_record', message: 'the record blob is missing or has another sha256' });
+    let rec;
+    try {
+      rec = JSON.parse(gunzipSync(blob).toString('utf8'));
+    } catch (e) {
+      return ok({ ok: false, code: 'bad_record', message: `the record does not decode: ${e.message}` });
+    }
     const b = questBackup(op, uuid, teamId, t, 'party_merge');
     t.done = questUnion(t.done, Array.isArray(rec?.done) ? rec.done : []);
-    sync.quests.imports.push({ uuid, teamId, sourceServerId: op.params.sourceServerId, sourceTeamId: op.params.sourceTeamId, at: Date.now() });
+    sync.quests.imports.push({ uuid, teamId, sourceServerId: op.params.sourceServerId, sourceTeamId: op.params.sourceTeamId, gzLen: blob.length, at: Date.now() });
     return ok({ ok: true, backupId: b.id });
   },
 };

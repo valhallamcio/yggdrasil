@@ -222,9 +222,6 @@ export const questBackupId = z
   .regex(/^[A-Za-z0-9._-]{1,128}$/, 'backupId must match [A-Za-z0-9._-]{1,128}')
   .refine((v) => v !== '.' && v !== '..', 'backupId must name a backup');
 
-/** The most JSON characters of one exported party record. The largest evol book is about 200 KB. */
-export const QUEST_RECORD_MAX_CHARS = 4 * 1024 * 1024;
-
 /** The fields of one `/quests` menu action, shared by the REST body and the op params. */
 export const questActionFields = {
   action: z.enum(QUEST_ACTIONS),
@@ -240,11 +237,6 @@ export function questActionRule(b: { action: (typeof QUEST_ACTIONS)[number]; val
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['backupId'], message: `${b.action} takes no backupId` });
   }
 }
-
-/** The opaque record of `quests_export_party`: a JSON object or a string, passed on as is. */
-const questRecord = z
-  .union([z.record(z.string(), z.unknown()), z.string().min(1)])
-  .refine((r) => JSON.stringify(r).length <= QUEST_RECORD_MAX_CHARS, `record is larger than ${QUEST_RECORD_MAX_CHARS} JSON characters`);
 
 const QUEST_OPS: Record<string, OpCatalogEntry> = {
   quests_status: {
@@ -280,17 +272,26 @@ const QUEST_OPS: Record<string, OpCatalogEntry> = {
     risk: 'safe',
     requiresFeature: 'player_sync',
     internal: true,
-    description: 'Quest progress: export the book of one party on this instance as a record for quests_import_party. Read only.',
+    description:
+      'Quest progress: export the book of one party on this instance for quests_import_party. Read only. The record goes up as a party_export syncsnap; the result names it by sha256.',
   },
   quests_import_party: {
     params: z
-      .object({ group: syncGroup, uuid: questUuid, record: questRecord, sourceServerId: z.string().min(1).max(64), sourceTeamId: questUuid })
+      .object({
+        group: syncGroup,
+        uuid: questUuid,
+        sha256: z.string().regex(/^[0-9a-f]{64}$/),
+        snapshotId: z.string().min(1).max(256),
+        sourceServerId: z.string().min(1).max(64),
+        sourceTeamId: questUuid,
+      })
       .strict(),
     serverGlobal: false,
     risk: 'reversible',
     requiresFeature: 'player_sync',
     internal: true,
-    description: "Quest progress: merge an exported party book into the player's current party on this instance (party owner only). The mod backs up the book first.",
+    description:
+      "Quest progress: merge an exported party book into the player's current party on this instance (party owner only). The mod backs up the book first. The party_export blob is attached at dispatch; snapshotId stays in Yggdrasil.",
   },
 };
 

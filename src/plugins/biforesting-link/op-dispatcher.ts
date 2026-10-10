@@ -22,7 +22,7 @@ export interface OpSendPort {
   linkServerIdFor?(instanceKey: string): string | null;
 }
 
-/** Where `sync_apply` blobs come from (the player sync snapshot store). */
+/** Where `sync_apply` and `quests_import_party` blobs come from (the player sync snapshot store). */
 export interface SyncSnapshotSource {
   get(id: string): Promise<SyncSnapshotDoc | null>;
 }
@@ -51,7 +51,7 @@ export class OpDispatcher {
     this.onUpdated = hook;
   }
 
-  /** Wire the player sync snapshot store. Without it a `sync_apply` fails at dispatch. */
+  /** Wire the player sync snapshot store. Without it a `sync_apply` or `quests_import_party` fails at dispatch. */
   setSyncSnapshots(source: SyncSnapshotSource | null): void {
     this.syncSnapshots = source;
   }
@@ -128,8 +128,8 @@ export class OpDispatcher {
       if (!hydrated) return false; // already marked failed with the reason
       params = hydrated.params;
       blob = hydrated.blob;
-    } else if (dispatched.type === 'sync_apply') {
-      const hydrated = await this.hydrateSyncApply(dispatched);
+    } else if (dispatched.type === 'sync_apply' || dispatched.type === 'quests_import_party') {
+      const hydrated = await this.hydrateSyncBlob(dispatched);
       if (!hydrated) return false; // already marked failed with the reason
       params = hydrated.params;
       blob = hydrated.blob;
@@ -196,26 +196,39 @@ export class OpDispatcher {
   }
 
   /**
-   * Attaches the release blob to a `sync_apply` dispatch (player-sync spec 3.5). The stored op
-   * names the snapshot by `snapshotId`; the wire params are `{group, moveId, v, sha256, fp}` and
-   * the gz bytes ride as the v2 blob. The mod gunzips. A snapshot that is gone or does not match
-   * fails the op with code `not_applied`, because the mod never saw it.
+   * Attaches a stored sync snapshot blob to the dispatch. The stored op names the snapshot by
+   * `snapshotId`. The wire params drop it, and the gz bytes ride as the v2 blob. The mod checks the
+   * sha256 and gunzips.
+   * - `sync_apply` (player-sync spec 3.5): the release snapshot of the target player. The wire
+   *   params are `{group, moveId, v, sha256, fp}`.
+   * - `quests_import_party` (spec 10.8): the `party_export` snapshot of `sourceTeamId` from
+   *   `sourceServerId`. The wire params are `{group, uuid, sha256, sourceServerId, sourceTeamId}`.
+   * A snapshot that is gone or does not match fails the op with code `not_applied`, because the
+   * mod never saw it.
    */
-  private async hydrateSyncApply(op: OpDoc): Promise<{ params: Record<string, unknown>; blob: Buffer } | null> {
+  private async hydrateSyncBlob(op: OpDoc): Promise<{ params: Record<string, unknown>; blob: Buffer } | null> {
     const { snapshotId, ...wire } = op.params as Record<string, unknown> & { snapshotId?: unknown };
     const fail = async (reason: string): Promise<null> => {
       const failed = await this.store.markFailed(op._id, reason, { ok: false, error: reason, code: 'not_applied' });
       if (failed) this.emitUpdated(failed);
-      logger.warn({ opId: op._id, snapshotId, reason }, 'biforesting-ops: sync_apply rejected');
+      logger.warn({ opId: op._id, snapshotId, reason }, `biforesting-ops: ${op.type} rejected`);
       return null;
     };
     if (!this.syncSnapshots) return fail('the sync snapshot store is not wired');
-    if (typeof snapshotId !== 'string') return fail('sync_apply has no snapshotId');
+    if (typeof snapshotId !== 'string') return fail(`${op.type} has no snapshotId`);
     const snap = await this.syncSnapshots.get(snapshotId);
     if (!snap) return fail(`sync snapshot ${snapshotId} not found`);
     if (snap.sha256 !== wire['sha256']) return fail(`sync snapshot ${snapshotId} has another sha256`);
     if (snap.group !== wire['group']) return fail(`sync snapshot ${snapshotId} belongs to group ${snap.group}`);
-    if (op.target?.uuid?.toLowerCase() !== snap.uuid) return fail(`sync snapshot ${snapshotId} is not the target player's`);
+    if (op.type === 'quests_import_party') {
+      if (snap.kind !== 'party_export') return fail(`sync snapshot ${snapshotId} is a ${snap.kind}, not a party_export`);
+      const team = String(wire['sourceTeamId']).toLowerCase();
+      if (snap.uuid !== team || snap.serverId !== wire['sourceServerId']) {
+        return fail(`sync snapshot ${snapshotId} is not the export of team ${team} from ${String(wire['sourceServerId'])}`);
+      }
+    } else if (op.target?.uuid?.toLowerCase() !== snap.uuid) {
+      return fail(`sync snapshot ${snapshotId} is not the target player's`);
+    }
     return { params: wire, blob: Buffer.from(snap.gz.buffer.subarray(0, snap.gz.position)) };
   }
 

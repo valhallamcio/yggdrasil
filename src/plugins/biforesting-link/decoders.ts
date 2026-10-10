@@ -393,7 +393,7 @@ export function decodeInvSnap(payload: Buffer): { header: InvSnapHeader; gz: Buf
 /** Cap of one syncsnap gz blob. The mod's own cap (`maxBlobBytes`) defaults to 2 MiB. */
 export const SYNCSNAP_MAX_GZ_BYTES = 8 * 1024 * 1024;
 
-const SYNC_SNAP_KINDS: readonly SyncSnapKind[] = ['shadow', 'release', 'pre_sync', 'pre_action'];
+const SYNC_SNAP_KINDS: readonly SyncSnapKind[] = ['shadow', 'release', 'pre_sync', 'pre_action', 'party_export'];
 
 export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 

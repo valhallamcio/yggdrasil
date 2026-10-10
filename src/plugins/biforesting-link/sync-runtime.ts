@@ -62,7 +62,7 @@ export const syncRunner = new SyncRunner({
 });
 
 export const syncQuests = new SyncQuests({
-  stores: { groups: syncGroupsStore, ledger: syncLedgerStore, merges: syncQuestMergesStore },
+  stores: { groups: syncGroupsStore, ledger: syncLedgerStore, merges: syncQuestMergesStore, snapshots: syncSnapshotStore },
   ops: opsStore,
   dispatch: opDispatcher,
   directory,

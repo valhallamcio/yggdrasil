@@ -13,6 +13,8 @@ import type { SyncSnapHeader, SyncSnapKind } from './types.js';
  * - `release`: newest 10, never one whose `v` equals the ledger version, no expiry.
  * - `pre_sync` and `pre_action`: newest 10 plus every one younger than 30 days, at most 200,
  *   180-day `expireAt` (phase6 DESIGN 5.3: keep them at least 30 days).
+ * - `party_export` (per group and team): newest 10, 1-day `expireAt`. A party merge reads it
+ *   seconds after the export.
  */
 
 const DAY_MS = 24 * 3600_000;
@@ -32,6 +34,7 @@ export const SNAPSHOT_RETENTION: Record<SyncSnapKind, SnapshotRetention> = {
   release: { keep: 10, ttlMs: null },
   pre_sync: { keep: 10, ttlMs: 180 * DAY_MS, minAgeMs: 30 * DAY_MS, max: 200 },
   pre_action: { keep: 10, ttlMs: 180 * DAY_MS, minAgeMs: 30 * DAY_MS, max: 200 },
+  party_export: { keep: 10, ttlMs: DAY_MS },
 };
 
 export interface SyncSnapshotDoc {
@@ -74,6 +77,8 @@ export interface SyncSnapshotInput {
  *   another blob, and a later move can reach the same `v` after an abort. Each gets its own doc.
  * - `pre_action`: `:<backupId, else at>:<first 12 hex of sha256>`. No move exists. Two actions
  *   on one book with the same bytes still get two docs.
+ * - `party_export`: `uuid` is the team id and `v` is 0, tail `:<first 12 hex of sha256>`. A second
+ *   export of an unchanged book is a replay of the first.
  */
 export function syncSnapshotId(
   group: string,
@@ -87,6 +92,7 @@ export function syncSnapshotId(
   const sha = (tail.sha256 ?? '').toLowerCase().slice(0, 12);
   if (kind === 'shadow') return `${base}:${tail.at ?? 0}`;
   if (kind === 'pre_action') return `${base}:${tail.backupId || String(tail.at ?? 0)}:${sha}`;
+  if (kind === 'party_export') return `${base}:${sha}`;
   return `${base}:${tail.moveId ?? ''}:${sha}`;
 }
 
@@ -174,6 +180,18 @@ export class SyncSnapshotStore {
   async newest(group: string, uuid: string, kind: SyncSnapKind): Promise<SyncSnapshotMeta | null> {
     await this.ensureIndexes();
     return this.col().find({ group, uuid: uuid.toLowerCase(), kind }, NO_BLOB).sort(NEWEST_FIRST).limit(1).next();
+  }
+
+  /**
+   * The `party_export` snapshot of one team from one instance with this sha256, without its blob.
+   * Null when it never arrived or expired.
+   */
+  async findPartyExport(group: string, serverId: string, teamId: string, sha256: string): Promise<SyncSnapshotMeta | null> {
+    await this.ensureIndexes();
+    return this.col().findOne(
+      { group, uuid: teamId.toLowerCase(), kind: 'party_export', serverId, sha256: sha256.toLowerCase() },
+      { ...NO_BLOB, sort: NEWEST_FIRST },
+    );
   }
 
   /** One snapshot with its blob. */

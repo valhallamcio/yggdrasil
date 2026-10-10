@@ -8,6 +8,7 @@ import { QUEST_LOCK_PREFIX, questLockHeld, type SyncLedgerStore, type SyncPlayer
 import { questMergeId, type QuestMergeStart, type SyncQuestMergeDoc, type SyncQuestMergesStore } from './sync-quest-merges-store.js';
 import { instanceLabel, SYNC_MESSAGES, SyncConflictError, type SyncRunnerDirectory } from './sync-runner.js';
 import type { SyncGroupsStore } from './sync-groups-store.js';
+import type { SyncSnapshotStore } from './sync-snapshot-store.js';
 import type { SyncInstanceLink, SyncLinkPort } from './sync-service.js';
 import type { OpsStore } from './ops-store.js';
 import type { GroupMember } from './server-resolver.js';
@@ -90,7 +91,7 @@ export class QuestOpError extends AppError {
 }
 
 export interface SyncQuestsDeps {
-  stores: { groups: SyncGroupsStore; ledger: SyncLedgerStore; merges: SyncQuestMergesStore };
+  stores: { groups: SyncGroupsStore; ledger: SyncLedgerStore; merges: SyncQuestMergesStore; snapshots: Pick<SyncSnapshotStore, 'findPartyExport'> };
   ops: Pick<OpsStore, 'create' | 'get' | 'cancel'>;
   dispatch: { onOpCreated(op: OpDoc): Promise<void> };
   directory: SyncRunnerDirectory;
@@ -273,6 +274,11 @@ export class SyncQuests {
    * target party, the merge doc reserves the (source, target) pair, `quests_export_party` on
    * `fromServer` reads the source book, and `quests_import_party` on the owner merges it. One
    * `done` merge per pair; a later call answers 409 `already_merged`.
+   *
+   * The record never rides in op JSON. The export sends it up as a `party_export` syncsnap before
+   * its result, and the result names it by sha256. The session handles its messages in order, so
+   * the snapshot is stored when the result arrives. The import op names the snapshot, and the
+   * dispatcher attaches its gz as the op blob.
    */
   async partyMerge(group: string, rawUuid: string, input: { fromServer: string; teamId: string }, actor: string): Promise<Record<string, unknown>> {
     const deadline = this.now() + this.timing.mergeMs;
@@ -310,12 +316,27 @@ export class SyncQuests {
           offlineCode: 'source_offline',
           onCreated: (op) => this.deps.stores.merges.update(merge._id, holder, { exportOpId: op._id }).then(() => undefined),
         });
-        const record = exp.data['record'];
-        if (record === undefined || record === null) throw new QuestOpError(502, 'bad_export', QUEST_MESSAGES.badExport, false);
+        const sha256 = typeof exp.data['sha256'] === 'string' ? exp.data['sha256'].toLowerCase() : '';
+        if (!/^[0-9a-f]{64}$/.test(sha256)) {
+          throw new QuestOpError(502, 'bad_export', QUEST_MESSAGES.badExport, false, { reason: 'the export result has no sha256' });
+        }
+        const snap = await this.deps.stores.snapshots.findPartyExport(group, fromServer, sourceTeamId, sha256);
+        if (!snap) {
+          throw new QuestOpError(502, 'bad_export', QUEST_MESSAGES.badExport, false, { reason: 'the party_export snapshot was not stored', sha256 });
+        }
         importing = true;
-        const imp = await this.call(owner, 'quests_import_party', { group, uuid, record, sourceServerId: fromServer, sourceTeamId }, { uuid, name: doc.name }, actor, members, deadline, {
-          onCreated: (op) => this.deps.stores.merges.update(merge._id, holder, { importOpId: op._id }).then(() => undefined),
-        });
+        const imp = await this.call(
+          owner,
+          'quests_import_party',
+          { group, uuid, sha256, snapshotId: snap._id, sourceServerId: fromServer, sourceTeamId },
+          { uuid, name: doc.name },
+          actor,
+          members,
+          deadline,
+          {
+            onCreated: (op) => this.deps.stores.merges.update(merge._id, holder, { importOpId: op._id }).then(() => undefined),
+          },
+        );
         const ok = imp.data['ok'] !== false;
         const backupId = typeof imp.data['backupId'] === 'string' ? imp.data['backupId'] : null;
         const code = typeof imp.data['code'] === 'string' ? imp.data['code'] : null;
@@ -324,7 +345,7 @@ export class SyncQuests {
           holder,
           ok ? { state: 'done', backupId, endedAt: new Date(this.now()) } : { state: 'failed', code: code ?? 'refused', endedAt: new Date(this.now()) },
         );
-        logger.info({ group, uuid, mergeId: merge._id, ok, code, backupId, actor }, 'biforesting-sync: quest party merge answered');
+        logger.info({ group, uuid, mergeId: merge._id, ok, code, backupId, snapshotId: snap._id, gzLen: snap.gzLen, actor }, 'biforesting-sync: quest party merge answered');
         return { ...imp.data, owner, ownerLabel: instanceLabel(members, owner), merge: mergeView(final ?? merge) };
       } catch (err) {
         // An import that may still run keeps the doc `running`. The next call settles it from the op.

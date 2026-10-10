@@ -306,6 +306,29 @@ test('snapshots: pre_action keys on the backupId, keeps 30 days and at most 200'
   assert.equal(all[0]!.header.backupId, 'b-199');
 });
 
+test('snapshots: party_export keys on team, source and sha256, lives one day, and findPartyExport finds it', async () => {
+  const team = uuid();
+  const sha = (c: string): string => c.repeat(64);
+  const h = header(team, 'party_export', 0, { name: 'Club', group: 'evol', sha256: sha('b'), at: 1_760_000_000_000 });
+  const first = await snapshots.insert({ group: 'evol', serverId: 'srv-b', header: h, gz: Buffer.from([7, 7]) });
+  assert.equal(first.snapshot._id, `evol:${team}:0:party_export:srv-b:${'b'.repeat(12)}`);
+  assert.equal(first.snapshot.expireAt!.getTime() - first.snapshot.createdAt.getTime(), DAY);
+  const again = await snapshots.insert({ group: 'evol', serverId: 'srv-b', header: { ...h, at: 1_760_000_000_500 }, gz: Buffer.from([7, 7]) });
+  assert.equal(again.duplicate, true, 'the same book exported again is a replay');
+
+  const found = await snapshots.findPartyExport('evol', 'srv-b', team.toUpperCase(), sha('B'));
+  assert.equal(found?._id, first.snapshot._id);
+  assert.equal((found as unknown as Record<string, unknown>)['gz'], undefined, 'no blob');
+  assert.equal(await snapshots.findPartyExport('evol', 'srv-a', team, sha('b')), null, 'another source');
+  assert.equal(await snapshots.findPartyExport('evol', 'srv-b', team, sha('c')), null, 'another sha256');
+  assert.equal(await snapshots.findPartyExport('other', 'srv-b', team, sha('b')), null, 'another group');
+
+  for (let i = 0; i < 12; i++) {
+    await snapshots.insert({ group: 'evol', serverId: 'srv-b', header: { ...h, sha256: (i + 10).toString(16).padEnd(64, '0') }, gz: Buffer.from([i]) });
+  }
+  assert.equal((await snapshots.list('evol', team, 'party_export')).length, SNAPSHOT_RETENTION.party_export.keep);
+});
+
 test('snapshots: release keeps 10, never the one at the ledger version, and has no expireAt', async () => {
   const u = uuid();
   const id = ledgerId('evol', u);

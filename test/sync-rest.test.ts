@@ -20,7 +20,7 @@ import {
   syncReseedBodySchema,
   syncSnapshotListQuerySchema,
 } from '../src/domains/biforesting/sync.schema.ts';
-import { OPS_CATALOG, QUEST_RECORD_MAX_CHARS } from '../src/domains/biforesting/ops-catalog.ts';
+import { OPS_CATALOG } from '../src/domains/biforesting/ops-catalog.ts';
 import { BiforestingController } from '../src/domains/biforesting/biforesting.controller.ts';
 import { ValidationError } from '../src/shared/errors/index.ts';
 
@@ -209,12 +209,14 @@ test('ops catalog: quest ops need player_sync, are internal and strict', () => {
   assert.equal(OPS_CATALOG['quests_export_party']!.serverGlobal, true, 'export names a team, no player');
   assert.equal(p('quests_export_party', { group: 'evol', teamId: T }), true);
   assert.equal(p('quests_export_party', { group: 'evol', teamId: T, uuid: U }), false);
-  const imp = { group: 'evol', uuid: U, record: { teamId: T, done: ['a'] }, sourceServerId: '1ae705e3', sourceTeamId: T };
+  const sha256 = 'c'.repeat(64);
+  const snapshotId = `evol:${T}:0:party_export:1ae705e3:${'c'.repeat(12)}`;
+  const imp = { group: 'evol', uuid: U, sha256, snapshotId, sourceServerId: '1ae705e3', sourceTeamId: T };
   assert.equal(p('quests_import_party', imp), true);
-  assert.equal(p('quests_import_party', { ...imp, record: 'H4sIAAAA' }), true, 'a string record passes as is');
-  assert.equal(p('quests_import_party', { ...imp, record: null }), false);
-  assert.equal(p('quests_import_party', { ...imp, record: [] }), false, 'a record is an object or a string');
-  assert.equal(p('quests_import_party', { ...imp, record: { big: 'x'.repeat(QUEST_RECORD_MAX_CHARS) } }), false, 'over the record cap');
+  assert.equal(p('quests_import_party', { ...imp, record: 'H4sIAAAA' }), false, 'the record no longer rides in the params');
+  assert.equal(p('quests_import_party', { ...imp, sha256: 'C'.repeat(64) }), false, 'sha256 is lowercase hex');
+  assert.equal(p('quests_import_party', { ...imp, sha256: 'c'.repeat(63) }), false);
+  assert.equal(p('quests_import_party', { group: 'evol', uuid: U, sha256, sourceServerId: '1ae705e3', sourceTeamId: T }), false, 'snapshotId is required');
   assert.equal(p('quests_import_party', { ...imp, sourceServerId: '' }), false);
 });
 

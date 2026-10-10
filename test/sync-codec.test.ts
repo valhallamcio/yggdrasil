@@ -196,6 +196,17 @@ test('syncsnap: pre_action keeps group, action and backupId; a non-string action
   assert.equal(odd.backupId, undefined);
 });
 
+test('syncsnap: party_export names the team in uuid and needs no moveId', () => {
+  const team = '6CA0C36E-7C3E-4E93-BF69-F75F25DD962B';
+  const { header: h } = decodeSyncSnap(syncsnap(header({ kind: 'party_export', uuid: team, name: 'mechanical_infinity', group: 'evol', playerData: [] })));
+  assert.equal(h.kind, 'party_export');
+  assert.equal(h.uuid, team.toLowerCase());
+  assert.equal(h.name, 'mechanical_infinity');
+  assert.equal(h.group, 'evol');
+  assert.equal(h.v, 0);
+  assert.equal(h.moveId, undefined);
+});
+
 test('syncsnap: bad version, kind, uuid and v are refused', () => {
   assert.throws(() => decodeSyncSnap(syncsnap(header(), GZ, GZ.length, 2)), /unsupported syncsnap version/);
   assert.throws(() => decodeSyncSnap(syncsnap(header({ kind: 'backup' }))), /kind backup is unknown/);

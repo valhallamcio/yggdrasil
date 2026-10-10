@@ -36,7 +36,7 @@ export const shadowMoveBodySchema = z
   .refine((b) => b.from !== b.to, { message: 'from and to must be different instances' });
 
 export const syncSnapshotListQuerySchema = z.object({
-  kind: z.enum(['shadow', 'release', 'pre_sync', 'pre_action']).optional(),
+  kind: z.enum(['shadow', 'release', 'pre_sync', 'pre_action', 'party_export']).optional(),
 });
 
 /** POST .../quests/action. The op goes to the owner instance (phase6 DESIGN 4 and 7). */

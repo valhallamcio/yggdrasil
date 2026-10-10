@@ -198,8 +198,12 @@ export interface SyncStamp {
   m?: string;
 }
 
-/** `pre_action`: the book before a `/quests` action or a party import (phase6 DESIGN 5.3). */
-export type SyncSnapKind = 'shadow' | 'release' | 'pre_sync' | 'pre_action';
+/**
+ * `pre_action`: the book before a `/quests` action or a party import (phase6 DESIGN 5.3).
+ * `party_export`: one party book for a party merge. Its `uuid` is the team id, and the gz is the
+ * quest record that `quests_import_party` gets as its blob.
+ */
+export type SyncSnapKind = 'shadow' | 'release' | 'pre_sync' | 'pre_action' | 'party_export';
 
 export interface SyncBlockedEntry {
   where: string;
@@ -225,7 +229,7 @@ export interface SyncWorldDataEntry {
 /** Decoded `biforesting:syncsnap` header (spec 3.4). The decoder keeps only well-typed fields. */
 export interface SyncSnapHeader {
   kind: SyncSnapKind;
-  /** Lowercase. */
+  /** Lowercase. The team id on `party_export`. */
   uuid: string;
   name: string;
   /** From the op params. Absent on shadow snapshots. */

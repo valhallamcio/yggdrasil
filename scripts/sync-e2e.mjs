@@ -8,12 +8,12 @@
  *
  * It starts mongodb-memory-server on 127.0.0.1:27117, seeds `bifrost.servers` (A and B in group
  * `evol`, C ungrouped), starts Yggdrasil from this checkout on 127.0.0.1:3123 (`node --import tsx
- * src/main.ts`), starts fake mods A and B, grants the policy and runs scenarios a to y against the
+ * src/main.ts`), starts fake mods A and B, grants the policy and runs scenarios a to z against the
  * REST API (the dupe audit l runs last). Each scenario prints one PASS or FAIL line. Exit 0 only
  * when all pass. Every process it started stops at the end. Logs: /tmp/sync-e2e-ygg.log,
  * /tmp/sync-e2e-fake-A.log, /tmp/sync-e2e-fake-B.log.
  *
- * The quest scenarios u to y (phase6 DESIGN 4 and 7) use their own group `qst` with three fake mods
+ * The quest scenarios u to z (phase6 DESIGN 4 and 7) use their own group `qst` with three fake mods
  * Q1 to Q3 (logs /tmp/sync-e2e-fake-Q<n>.log). The first of them starts the fakes and sets the
  * group live, so the evol scenarios and the dupe audit never see them.
  *
@@ -21,7 +21,7 @@
  * A run takes about 10 minutes: scenarios d and n wait out the 120 s exec timeout of an op with no result.
  */
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, openSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
@@ -1268,6 +1268,31 @@ const scenarios = [
     } finally {
       await fq1.fault({ reset: true });
     }
+  }],
+  ['z', 'quests: a party record over 64 KiB rides the party_export snapshot and the op blob', async () => {
+    await ensureQuestGroup();
+    const p = await questPlayer('bigmerge');
+    const friend = '00000000-0000-4000-9000-0000000ffffd';
+    const target = newTeamId();
+    const source = newTeamId();
+    // Random quest ids barely compress: 10000 of them give a gzip record of about 90 KiB.
+    const done = Array.from({ length: 10_000 }, () => randomBytes(8).toString('hex'));
+    await fq1.quests({ teams: { [target]: { kind: 'party', name: 'Home', owner: p.uuid, members: [p.uuid], done: ['a'] } } });
+    await fq2.quests({ teams: { [source]: { kind: 'party', name: 'Big', owner: friend, members: [friend, p.uuid], done } } });
+    const r = await api('POST', qPath(p.uuid, '/party-merge'), { fromServer: Q2, teamId: source });
+    eq([r.status, r.body.data?.ok, r.body.data?.merge?.state], [200, true, 'done'], `merge: ${JSON.stringify(r.body).slice(0, 400)}`);
+    eq((await fq1.state()).quests.teams[target].done.length, done.length + 1, 'the whole source book merged');
+
+    const snap = await mongo.db(DB_NAME).collection('biforesting_sync_snapshots').findOne({ kind: 'party_export', uuid: source });
+    assert(snap, 'a party_export snapshot of the source team');
+    assert(snap.gzLen > 64 * 1024, `the record is over the 64 KiB op limit: ${snap.gzLen} gz bytes`);
+    eq([snap.serverId, snap.group, snap.v], [Q2, QGROUP, 0], 'the snapshot names its source');
+    eq(snap.expireAt.getTime() - snap.createdAt.getTime(), 24 * 3600_000, 'the snapshot lives one day');
+    const imp = await mongo.db(DB_NAME).collection('biforesting_ops').findOne({ type: 'quests_import_party', 'params.sourceTeamId': source });
+    eq([imp?.state, imp?.params?.snapshotId, imp?.params?.sha256, 'record' in (imp?.params ?? {})], ['completed', snap._id, snap.sha256, false], 'the import op names the snapshot');
+    const got = (await fq1.state()).quests.imports.find((x) => x.sourceTeamId === source);
+    eq(got?.gzLen, snap.gzLen, 'Q1 got the whole record as the op blob');
+    eq(await questLease(p.uuid), null, 'no quest lock is left');
   }],
   ['l', 'dupe audit', async () => {
     const sa = await fa.state();

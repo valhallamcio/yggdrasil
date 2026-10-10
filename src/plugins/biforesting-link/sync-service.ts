@@ -126,8 +126,9 @@ export class SyncService implements SyncSink {
   /**
    * One decoded `biforesting:syncsnap`. It is stored under the sending server's serverId and the
    * group of its server doc. A snapshot that names another group is dropped. Mode `off` drops
-   * shadow snapshots only: release and pre_sync come from move ops, which S1 never sends, and
-   * pre_action is the central backup of a quest write (phase6 DESIGN 5.3).
+   * shadow snapshots only: release and pre_sync come from move ops, which S1 never sends,
+   * pre_action is the central backup of a quest write (phase6 DESIGN 5.3), and party_export is
+   * the record of a party merge.
    */
   async onSyncSnap(identity: LinkIdentity, snap: DecodedSyncSnap): Promise<void> {
     const { header, gz } = snap;
