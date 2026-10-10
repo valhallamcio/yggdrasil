@@ -17,7 +17,7 @@ import { SyncMovesStore } from '../../src/plugins/biforesting-link/sync-moves-st
 import { SyncWorldDataStore } from '../../src/plugins/biforesting-link/sync-worlddata-store.ts';
 import { SyncQuestMergesStore, questMergeId, type SyncQuestMergeDoc } from '../../src/plugins/biforesting-link/sync-quest-merges-store.ts';
 import { SyncRunner, SyncConflictError, SYNC_MESSAGES, type SyncRunnerDirectory } from '../../src/plugins/biforesting-link/sync-runner.ts';
-import { SyncQuests, QuestOpError, type SyncQuestsTiming } from '../../src/plugins/biforesting-link/sync-quests.ts';
+import { SyncQuests, QuestOpError, QUEST_MESSAGES, type SyncQuestsTiming } from '../../src/plugins/biforesting-link/sync-quests.ts';
 import type { SyncInstanceLink } from '../../src/plugins/biforesting-link/sync-service.ts';
 import type { GroupMember } from '../../src/plugins/biforesting-link/server-resolver.ts';
 import type { OpDoc, OpTarget } from '../../src/plugins/biforesting-link/types.ts';
@@ -323,6 +323,58 @@ test('action: an old mod answers unsupported_op: 409 not_ready at once, the lock
   await assert.rejects(q, rejectsWith('move_mark'));
 });
 
+test('review N5: no mod message or exception text reaches the caller; a mod code goes out checked, with a fixed line', async () => {
+  const java = 'java.lang.IllegalStateException: boom\n\tat com.valhalla.biforesting.network.sync.QuestMenuOps.leave(QuestMenuOps.java:375)';
+  const leaks = (v: unknown): boolean => /java\.|QuestMenuOps|\\tat /.test(JSON.stringify(v));
+  const failWith = async (s: Sent, code: string | undefined, error: string): Promise<void> => {
+    await ack(s);
+    await dispatcher.onOpRes(s.instanceKey, { opId: s.opId, phase: 'result', status: 'failed', ...(code ? { code } : {}), error });
+  };
+  const u = newUuid();
+  await seed(u, Q1);
+
+  const p = quests.action('qg', u, { action: 'leave' }, 'test');
+  await reply(await nextSent('quests_action', Q1), 'completed', { ok: false, code: 'failed', message: `the change failed: ${java}`, backupId: 'b-1' });
+  const view = await p;
+  assert.deepEqual([view['ok'], view['code'], view['message'], view['backupId']], [false, 'failed', QUEST_MESSAGES.refused, 'b-1']);
+  assert.ok(!leaks(view), 'no Java text in a refusal');
+
+  const q = quests.action('qg', u, { action: 'leave' }, 'test');
+  await reply(await nextSent('quests_action', Q1), 'completed', { ok: false, code: java });
+  assert.equal((await q)['code'], 'failed', 'a code outside the id shape goes out as failed');
+
+  const r = quests.action('qg', u, { action: 'pref', value: 'merge' }, 'test');
+  await reply(await nextSent('quests_action', Q1), 'completed', { ok: true, message: java });
+  const done = await r;
+  assert.equal(done['ok'], true);
+  assert.equal('message' in done, false, 'a success drops the mod message');
+
+  const f = quests.action('qg', u, { action: 'fresh' }, 'test');
+  await failWith(await nextSent('quests_action', Q1), 'bad_record', java);
+  await assert.rejects(f, (err: unknown) => {
+    assert.ok(err instanceof QuestOpError);
+    assert.deepEqual([err.statusCode, err.code, err.message], [409, 'bad_record', QUEST_MESSAGES.refused]);
+    assert.ok(!leaks(err.toJSON()), 'no Java text in a failed op');
+    return true;
+  });
+
+  const old = quests.action('qg', u, { action: 'fresh' }, 'test');
+  await failWith(await nextSent('quests_action', Q1), 'unsupported_op', java);
+  await assert.rejects(old, (err: unknown) => err instanceof QuestOpError && err.code === 'not_ready' && !leaks(err.toJSON()));
+
+  // The ack of a failed op without a code keeps the lock, so this one needs its own player.
+  const v = newUuid();
+  await seed(v, Q1);
+  const g = quests.action('qg', v, { action: 'fresh' }, 'test');
+  await failWith(await nextSent('quests_action', Q1), undefined, java);
+  await assert.rejects(g, (err: unknown) => {
+    assert.ok(err instanceof QuestOpError);
+    assert.deepEqual([err.statusCode, err.code, err.message, err.unsettled], [502, 'op_failed', 'Instance 1 could not run it.', true]);
+    assert.ok(!leaks(err.toJSON()), 'no Java text in op_failed');
+    return true;
+  });
+});
+
 test('action: no result in time: 409 timeout; a dispatched op is cancelled, an acked one runs on; the lock stays until it lapses', async () => {
   const u = newUuid();
   await seed(u, Q1);
@@ -497,9 +549,10 @@ test('party merge: a failed export frees the pair; an import the mod refuses ans
   assert.equal((await ledger.get('qg', u))?.lease, null);
 
   const p2 = quests.partyMerge('qg', u, { fromServer: Q2, teamId: T3 }, 'test');
-  await answerMerge(T3, { teamId: T3, done: [] }, { ok: false, code: 'not_owner' });
+  await answerMerge(T3, { teamId: T3, done: [] }, { ok: false, code: 'not_owner', message: 'java.lang.NullPointerException' });
   const v2 = await p2;
   assert.equal(v2['ok'], false);
+  assert.equal(v2['message'], QUEST_MESSAGES.refused, 'the mod message stays out');
   assert.equal((v2['merge'] as Record<string, unknown>)['state'], 'failed');
   assert.equal((await merges.get(id))?.code, 'not_owner');
 

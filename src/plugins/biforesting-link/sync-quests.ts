@@ -58,7 +58,10 @@ const LOCK_SLACK_MS = 5_000;
 /** After these op states nothing more happens for a REST call. A `waiting_player` op gets cancelled. */
 const ENDED: ReadonlySet<OpState> = new Set(['completed', 'failed', 'cancelled', 'expired', 'waiting_player']);
 
-/** Player-facing lines. Bifrost has its own text per code and shows `message` for other codes. */
+/**
+ * The `message` lines of the answers. Bifrost shows its own text per code and never shows
+ * `message`. The mod's own text never goes out: it can hold Java exception text.
+ */
 export const QUEST_MESSAGES = {
   paused: 'Quest options are paused right now.',
   moving: 'Your character is moving between instances. Try again when it has arrived.',
@@ -72,7 +75,16 @@ export const QUEST_MESSAGES = {
   alreadyMerged: 'You already merged that party into your party.',
   mergeBusy: 'This party merge is still running. Try again in a minute.',
   badExport: 'The other instance sent no usable party book.',
+  refused: 'The instance refused this quest call.',
+  callFailed: 'The call to this instance failed.',
 } as const;
+
+/** A mod code goes out only in this shape. Any other value goes out as `failed`. */
+const MOD_CODE_RE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+
+function modCode(v: unknown): string {
+  return typeof v === 'string' && MOD_CODE_RE.test(v) ? v : 'failed';
+}
 
 /**
  * A quest op that did not complete. `unsettled` is true when the op may still run on the
@@ -138,6 +150,17 @@ interface OwnerAt {
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/**
+ * A completed write result as the caller gets it. The mod's `message` stays out. A refusal
+ * (`ok: false`) gets a checked code and a fixed line.
+ */
+function writeResult(data: Record<string, unknown>): Record<string, unknown> {
+  const out = { ...data };
+  delete out['message'];
+  if (out['ok'] !== false) return out;
+  return { ...out, code: modCode(out['code']), message: QUEST_MESSAGES.refused };
 }
 
 function mergeView(doc: SyncQuestMergeDoc): QuestMergeView {
@@ -206,8 +229,12 @@ export class SyncQuests {
     const holder = await this.lock(group, uuid, at.owner, deadline);
     let release = true;
     try {
-      const { data } = await this.call(at.owner, 'quests_action', params, { uuid, name: at.doc.name }, actor, at.members, deadline);
-      logger.info({ group, uuid, owner: at.owner, action: input.action, ok: data['ok'], code: data['code'], backupId: data['backupId'], actor }, 'biforesting-sync: quest action answered');
+      const { data: raw } = await this.call(at.owner, 'quests_action', params, { uuid, name: at.doc.name }, actor, at.members, deadline);
+      const data = writeResult(raw);
+      logger.info(
+        { group, uuid, owner: at.owner, action: input.action, ok: data['ok'], code: data['code'], backupId: data['backupId'], modMessage: raw['message'], actor },
+        'biforesting-sync: quest action answered',
+      );
       return { ...data, owner: at.owner, ownerLabel: instanceLabel(at.members, at.owner) };
     } catch (err) {
       if (err instanceof QuestOpError && err.unsettled) release = false;
@@ -243,7 +270,8 @@ export class SyncQuests {
           const code = err instanceof AppError ? err.code : 'error';
           const message = err instanceof Error ? err.message : String(err);
           logger.warn({ group, uuid, serverId: m.serverId, code, message }, 'biforesting-sync: quest party candidates of one member failed');
-          return { instance: { ...base, status: 'error', code, message }, parties: [] };
+          const shown = err instanceof AppError ? err.message : QUEST_MESSAGES.callFailed;
+          return { instance: { ...base, status: 'error', code, message: shown }, parties: [] };
         }
       }),
     );
@@ -337,16 +365,20 @@ export class SyncQuests {
             onCreated: (op) => this.deps.stores.merges.update(merge._id, holder, { importOpId: op._id }).then(() => undefined),
           },
         );
-        const ok = imp.data['ok'] !== false;
-        const backupId = typeof imp.data['backupId'] === 'string' ? imp.data['backupId'] : null;
-        const code = typeof imp.data['code'] === 'string' ? imp.data['code'] : null;
+        const data = writeResult(imp.data);
+        const ok = data['ok'] !== false;
+        const backupId = typeof data['backupId'] === 'string' ? data['backupId'] : null;
+        const code = ok ? null : String(data['code']);
         const final = await this.deps.stores.merges.update(
           merge._id,
           holder,
-          ok ? { state: 'done', backupId, endedAt: new Date(this.now()) } : { state: 'failed', code: code ?? 'refused', endedAt: new Date(this.now()) },
+          ok ? { state: 'done', backupId, endedAt: new Date(this.now()) } : { state: 'failed', code: code ?? 'failed', endedAt: new Date(this.now()) },
         );
-        logger.info({ group, uuid, mergeId: merge._id, ok, code, backupId, snapshotId: snap._id, gzLen: snap.gzLen, actor }, 'biforesting-sync: quest party merge answered');
-        return { ...imp.data, owner, ownerLabel: instanceLabel(members, owner), merge: mergeView(final ?? merge) };
+        logger.info(
+          { group, uuid, mergeId: merge._id, ok, code, backupId, modMessage: imp.data['message'], snapshotId: snap._id, gzLen: snap.gzLen, actor },
+          'biforesting-sync: quest party merge answered',
+        );
+        return { ...data, owner, ownerLabel: instanceLabel(members, owner), merge: mergeView(final ?? merge) };
       } catch (err) {
         // An import that may still run keeps the doc `running`. The next call settles it from the op.
         if (!(importing && err instanceof QuestOpError && err.unsettled)) {
@@ -470,10 +502,10 @@ export class SyncQuests {
   /**
    * Creates one quest op that expires at `deadline`, dispatches it and waits for its result until
    * then. Answers the result data of a completed op. Throws a {@link QuestOpError} otherwise: 409
-   * `not_ready` from a mod build without the op, 409 with the mod's code for another failure, 409
-   * `player_offline` for a parked op, 409 `timeout` when no result came in time. An op still
-   * before its ack at the deadline is cancelled. `onCreated` runs after the create and before the
-   * dispatch.
+   * `not_ready` from a mod build without the op, 409 with the mod's code and a fixed line for
+   * another failure, 502 `op_failed` for a failure without a code, 409 `player_offline` for a
+   * parked op, 409 `timeout` when no result came in time. An op still before its ack at the
+   * deadline is cancelled. `onCreated` runs after the create and before the dispatch.
    */
   private async call(
     serverId: string,
@@ -515,14 +547,15 @@ export class SyncQuests {
     if (end.state === 'completed') return { op: end, data: isRecord(end.result?.data) ? end.result.data : {} };
     if (end.state === 'failed') {
       const code = end.result?.code;
-      const error = end.result?.error ?? 'the op failed';
+      // The error text can hold Java exception text. Only the log gets it.
+      logger.warn({ ...details, code: code ?? null, error: end.result?.error ?? null }, 'biforesting-sync: quest op failed');
       if (code === 'unsupported_op') {
-        throw new QuestOpError(409, 'not_ready', `Quest options need a newer mod version on ${label}.`, false, { ...details, error });
+        throw new QuestOpError(409, 'not_ready', `Quest options need a newer mod version on ${label}.`, false, details);
       }
       if (code === 'feature_off') throw new QuestOpError(409, 'feature_missing', `Quest options are not open on ${label} yet.`, false, details);
-      if (code) throw new QuestOpError(409, code, error, false, details);
+      if (code) throw new QuestOpError(409, modCode(code), QUEST_MESSAGES.refused, false, details);
       // No code: the dispatcher gave up on it. After an ack it may still run there.
-      throw new QuestOpError(502, 'op_failed', `${label} could not run it: ${error}`, end.ackedAt !== null, details);
+      throw new QuestOpError(502, 'op_failed', `${label} could not run it.`, end.ackedAt !== null, details);
     }
     if (end.state === 'waiting_player') {
       const cancelled = await this.deps.ops.cancel(end._id, 'sync-quests');
