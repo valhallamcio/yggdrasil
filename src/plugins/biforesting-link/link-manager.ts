@@ -12,6 +12,22 @@ import { decodeSpike } from './profile-spike.js';
 import { storeSpikeReport } from './profile-store.js';
 import { getPolicy, ZERO_POLICY } from './policy-store.js';
 import { serverResolver } from './server-resolver.js';
+import {
+  LIVE_CHANNEL,
+  LIVE_FEATURE_BIT,
+  LIVE_MAX_PAYLOAD,
+  LIVE_UP_BURST,
+  LIVE_UP_RATE_PER_SEC,
+  TokenBucket,
+  decodeLive,
+  emptyLiveStats,
+  encodeLive,
+  parseLiveDown,
+  type LiveDropReason,
+  type LiveMsg,
+  type LiveStats,
+  type LiveUpMsg,
+} from './live.js';
 import type { DecodedSyncSnap, LinkIdentity, LinkMetrics, LinkSnapshot, LinkSessionSnapshot, OpResMsg, PresenceMsg, RegisterInfo, RegisterSync } from './types.js';
 
 const HELLO = 'biforesting:hello';
@@ -82,9 +98,18 @@ interface Session {
   lastDataVersion: number | null;
   /** Metadata from the `biforesting:register` handshake, if the mod sent one. */
   register: RegisterInfo | null;
+  /** Bits granted in the last reg_ack (policy ∩ capabilities). 0 until the first reg_ack. */
+  granted: number;
+  liveBucket: TokenBucket;
+  liveUp: number;
+  liveDown: number;
+  liveDropped: number;
   /** Per-session serialization tail: ensures `hello` resolves identity before later channels run. */
   tail: Promise<void>;
 }
+
+/** Where `live.up` goes (the Bifrost proxy socket). False when no proxy is connected. */
+export type LiveUpSink = (msg: LiveUpMsg) => boolean;
 
 /**
  * Singleton tracking all live play-phase link sessions (the `bifrost/state-manager.ts` analog for
@@ -97,6 +122,8 @@ class BiforestingLinkManager {
   private downSeq = 0;
   private opSink: OpSink | null = null;
   private syncSink: SyncSink | null = null;
+  private liveUpSink: LiveUpSink | null = null;
+  private liveStats: LiveStats = emptyLiveStats();
 
   /** Wire the op dispatcher (plugin init). */
   setOpSink(sink: OpSink | null): void {
@@ -106,6 +133,11 @@ class BiforestingLinkManager {
   /** Wire the player sync service (plugin init). */
   setSyncSink(sink: SyncSink | null): void {
     this.syncSink = sink;
+  }
+
+  /** Wire the `live.up` target (websocket plugin init). */
+  setLiveUpSink(sink: LiveUpSink | null): void {
+    this.liveUpSink = sink;
   }
 
   /** instanceKeys of all live, identity-resolved sessions (op dispatch sweep). */
@@ -136,6 +168,11 @@ class BiforestingLinkManager {
       chunkTeams: 0,
       lastDataVersion: null,
       register: null,
+      granted: 0,
+      liveBucket: new TokenBucket(LIVE_UP_RATE_PER_SEC, LIVE_UP_BURST, Date.now()),
+      liveUp: 0,
+      liveDown: 0,
+      liveDropped: 0,
       tail: Promise.resolve(),
     });
   }
@@ -255,6 +292,9 @@ class BiforestingLinkManager {
         break;
       case SYNCSNAP:
         if (s.identity?.resolved) await this.onSyncSnap(s, s.identity, payload);
+        break;
+      case LIVE_CHANNEL:
+        this.onLiveUp(s, payload);
         break;
       default:
         logger.debug({ sessionId: s.sessionId, channel, bytes: payload.length }, 'biforesting-link: unknown channel');
@@ -437,11 +477,12 @@ class BiforestingLinkManager {
     // Grant only bits the mod actually advertised: granted = policy ∩ capabilities.
     const caps = s.register?.capabilities ?? 0;
     const negotiatedVersion = Math.min(s.register?.linkProtocolVersion ?? 1, LINK_PROTOCOL_VERSION);
+    s.granted = policy.enabledFeatures & caps;
     const ack = encodeRegAck({
       accepted,
       canonicalServerId,
       friendlyName,
-      enabledFeatures: policy.enabledFeatures & caps,
+      enabledFeatures: s.granted,
       metricsHz: policy.metricsHz,
       questHz: policy.questHz,
       chunkHz: policy.chunkHz,
@@ -532,6 +573,98 @@ class BiforestingLinkManager {
     }
   }
 
+  // ── Live bus (non-durable, no queue) ───────────────────────────────────────
+
+  private dropLive(s: Session | null, reason: LiveDropReason, extra: Record<string, unknown>): void {
+    this.liveStats.dropped[reason] += 1;
+    if (s) s.liveDropped += 1;
+    logger.debug(
+      { sessionId: s?.sessionId ?? null, instanceKey: s?.identity?.instanceKey ?? null, reason, ...extra },
+      'biforesting-link: live frame dropped',
+    );
+  }
+
+  /** `biforesting:live` UP: gate, cap, decode, forward to the proxy as `live.up`. */
+  private onLiveUp(s: Session, payload: Buffer): void {
+    const identity = s.identity;
+    if (!identity?.resolved) return this.dropLive(s, 'unresolved', { dir: 'up' });
+    if ((s.granted & LIVE_FEATURE_BIT) === 0) return this.dropLive(s, 'bit_off', { dir: 'up' });
+    if (payload.length > LIVE_MAX_PAYLOAD) return this.dropLive(s, 'oversize', { dir: 'up', bytes: payload.length });
+    if (!s.liveBucket.take(Date.now())) return this.dropLive(s, 'rate', { dir: 'up' });
+    let msg: LiveMsg;
+    try {
+      msg = decodeLive(payload);
+    } catch (err) {
+      return this.dropLive(s, 'malformed', { dir: 'up', err: (err as Error).message });
+    }
+    const up: LiveUpMsg = {
+      instanceKey: identity.instanceKey,
+      serverId: identity.serverId,
+      tag: identity.tag,
+      topic: msg.topic,
+      player: msg.player,
+      data: msg.data,
+      at: Date.now(),
+    };
+    if (!this.liveUpSink?.(up)) return this.dropLive(s, 'no_proxy', { dir: 'up', topic: msg.topic });
+    s.liveUp += 1;
+    this.liveStats.up += 1;
+  }
+
+  /**
+   * `live.down` from the proxy: `{server, topic, player, data}`. `server` is a serverId,
+   * instanceKey or tag, or `"*"` for every live session with the bit. Returns the number of
+   * sessions written. Never throws and never queues.
+   */
+  sendLiveDown(raw: unknown): number {
+    const req = parseLiveDown(raw);
+    if (!req) {
+      this.dropLive(null, 'malformed', { dir: 'down' });
+      return 0;
+    }
+    const payload = encodeLive(req.msg);
+    if (payload.length > LIVE_MAX_PAYLOAD) {
+      this.dropLive(null, 'oversize', { dir: 'down', server: req.server, bytes: payload.length });
+      return 0;
+    }
+
+    let targets: Session[];
+    if (req.server === '*') {
+      targets = [...this.sessions.values()].filter((s) => s.identity?.resolved && (s.granted & LIVE_FEATURE_BIT) !== 0);
+    } else {
+      const s = this.getSessionByServer(req.server);
+      if (!s) {
+        this.dropLive(null, 'unknown_server', { dir: 'down', server: req.server, topic: req.msg.topic });
+        return 0;
+      }
+      if (!s.identity?.resolved || (s.granted & LIVE_FEATURE_BIT) === 0) {
+        this.dropLive(s, 'bit_off', { dir: 'down', topic: req.msg.topic });
+        return 0;
+      }
+      targets = [s];
+    }
+
+    let sent = 0;
+    for (const s of targets) {
+      try {
+        if (this.sendDownToSession(s, LIVE_CHANNEL, payload)) {
+          s.liveDown += 1;
+          sent += 1;
+          continue;
+        }
+      } catch (err) {
+        logger.debug({ err, sessionId: s.sessionId }, 'biforesting-link: live DOWN write failed');
+      }
+      this.dropLive(s, 'not_writable', { dir: 'down', topic: req.msg.topic });
+    }
+    this.liveStats.down += sent;
+    return sent;
+  }
+
+  getLiveStats(): LiveStats {
+    return { up: this.liveStats.up, down: this.liveStats.down, dropped: { ...this.liveStats.dropped } };
+  }
+
   private emitData(s: Session, channel: 'registry' | 'quest' | 'chunks', count: number): void {
     if (!s.identity) return;
     eventBus.emit('biforesting.link.data', {
@@ -594,7 +727,7 @@ class BiforestingLinkManager {
     for (const frame of frames) {
       s.transport.send(encodeOuterUnit(channel, frame));
     }
-    logger.info(
+    logger[channel === LIVE_CHANNEL ? 'debug' : 'info'](
       { sessionId: s.sessionId, instanceKey: s.identity?.instanceKey ?? null, channel, frames: frames.length, bytes: payload.length },
       'biforesting-link: DOWN sent',
     );
@@ -619,6 +752,8 @@ class BiforestingLinkManager {
       chunkTeams: s.chunkTeams,
       lastDataVersion: s.lastDataVersion,
       register: s.register,
+      grantedFeatures: s.granted,
+      live: { up: s.liveUp, down: s.liveDown, dropped: s.liveDropped },
     };
   }
 
@@ -628,6 +763,7 @@ class BiforestingLinkManager {
       sessions: Array.from(this.sessions.values()).map((s) => this.toSnapshot(s)),
       count: this.sessions.size,
       timestamp: new Date().toISOString(),
+      live: this.getLiveStats(),
     };
   }
 

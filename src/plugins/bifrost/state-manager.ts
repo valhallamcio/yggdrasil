@@ -148,6 +148,19 @@ class BifrostStateManager {
     }
   }
 
+  /** Send to the connected proxy only. False when no proxy socket is open, so the caller can drop. */
+  trySendToProxy(type: string, payload: unknown): boolean {
+    const ws = this.activeWs;
+    if (!ws || ws.readyState !== 1 /* OPEN */) return false;
+    try {
+      ws.send(JSON.stringify({ type, payload }));
+      return true;
+    } catch (err) {
+      logger.debug({ err, type }, 'BifrostStateManager: failed to send message to proxy');
+      return false;
+    }
+  }
+
   // ── Connection lifecycle ─────────────────────────────────────────────────
 
   setConnected(ws: WebSocket): void {

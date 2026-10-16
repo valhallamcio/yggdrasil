@@ -70,6 +70,8 @@ export const FEATURE_BITS: Record<string, number> = {
   player_sync: 0x80000,
   // Reserved for the shutdown guard. Nothing reads it yet.
   shutdown_guard: 0x100000,
+  // Live bus (biforesting:live), see live.ts.
+  live: 0x200000,
 };
 
 export function maskForFeatures(names: string[]): number {

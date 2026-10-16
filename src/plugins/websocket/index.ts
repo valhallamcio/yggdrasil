@@ -148,6 +148,10 @@ export class WebSocketPlugin implements Plugin {
         try {
           const msg = JSON.parse(raw.toString()) as { type: string; payload?: Record<string, unknown> };
           wsLogger.debug({ msgType: msg.type }, 'Bifrost message received');
+          if (msg.type === 'live.down') {
+            biforestingLinkManager.sendLiveDown(msg.payload);
+            return;
+          }
           bifrostStateManager.handleMessage(msg.type, msg.payload ?? {});
         } catch {
           wsLogger.warn('Invalid JSON from Bifrost');
@@ -165,6 +169,9 @@ export class WebSocketPlugin implements Plugin {
       // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
       ws.on('error', (err: unknown) => wsLogger.error({ err }, 'Bifrost WebSocket error'));
     });
+
+    // `biforesting:live` UP goes to the Bifrost proxy socket only, never to dashboard clients.
+    biforestingLinkManager.setLiveUpSink((msg) => bifrostStateManager.trySendToProxy('live.up', msg));
 
     // ── Periodic full-state snapshot ─────────────────────────────────────────
     this.snapshotInterval = setInterval(() => {
@@ -274,6 +281,7 @@ export class WebSocketPlugin implements Plugin {
       this.snapshotInterval = null;
     }
     this.consoleSubscriptions.clear();
+    biforestingLinkManager.setLiveUpSink(null);
 
     const closeWss = (wss: unknown): Promise<void> =>
       new Promise<void>((resolve, reject) => {
