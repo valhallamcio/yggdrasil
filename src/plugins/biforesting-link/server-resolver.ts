@@ -17,6 +17,8 @@ interface ServerEntry {
   name: string;
 }
 
+type ServerSource = () => Promise<Array<{ _id: import('mongodb').ObjectId; tag: string; serverId: string; name: string }>>;
+
 const CACHE_TTL_MS = 60_000;
 
 class ServerResolver {
@@ -26,8 +28,16 @@ class ServerResolver {
   private byTag = new Map<string, ServerEntry[]>();
   private loadedAt = 0;
 
+  private source: ServerSource = () => this.repo.findAllForSync();
+
+  /** Test seam: replace the server-doc source (unit tests run without Mongo). */
+  setSource(source: ServerSource): void {
+    this.source = source;
+    this.loadedAt = 0;
+  }
+
   private async refresh(): Promise<void> {
-    const servers = await this.repo.findAllForSync();
+    const servers = await this.source();
     const byServerId = new Map<string, ServerEntry>();
     const tagGroups = new Map<string, string[]>();
     const byTag = new Map<string, ServerEntry[]>();

@@ -1,4 +1,5 @@
 import type { ObjectId } from 'mongodb';
+import type { LiveStats } from './live.js';
 
 // ── Decoded UP payloads (mirror bifrost-lib/test/ygg_mock.py parsers) ─────────
 
@@ -281,6 +282,10 @@ export interface LinkSessionSnapshot {
   lastDataVersion: number | null;
   /** Metadata from the `biforesting:register` handshake, if the mod sent one. */
   register: RegisterInfo | null;
+  /** Bits granted in the last reg_ack (policy ∩ capabilities). */
+  grantedFeatures: number;
+  /** `biforesting:live` frame counts for this session. */
+  live: { up: number; down: number; dropped: number };
 }
 
 export interface LinkSnapshot {
@@ -288,4 +293,6 @@ export interface LinkSnapshot {
   sessions: LinkSessionSnapshot[];
   count: number;
   timestamp: string;
+  /** `biforesting:live` totals since boot, drops by reason. */
+  live: LiveStats;
 }

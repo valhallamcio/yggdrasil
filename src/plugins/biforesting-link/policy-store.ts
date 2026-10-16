@@ -66,6 +66,8 @@ export const FEATURE_BITS: Record<string, number> = {
   profiler: 0x20000,
   // Reserved for the spike catcher (profiler plan phase 6). Nothing reads it yet.
   spike_catcher: 0x40000,
+  // 0x80000 (player_sync) and 0x100000 (shutdown_guard) are taken on wip/evol-sync.
+  live: 0x200000,
 };
 
 export function maskForFeatures(names: string[]): number {

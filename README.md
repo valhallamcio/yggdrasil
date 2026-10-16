@@ -227,7 +227,9 @@ Attaches two WebSocket servers to the HTTP server, both authenticating via `?tok
 
 **Client commands:** `console.subscribe` / `console.unsubscribe` for per-server console streaming.
 
-**Inbound Bifrost message types:** `player.joined`, `player.left`, `player.server.changed`, `player.list.updated`, `player.message`, `player.position`, `player.inventory`
+**Inbound Bifrost message types:** `player.joined`, `player.left`, `player.server.changed`, `player.list.updated`, `player.message`, `player.position`, `player.inventory`, `live.down`
+
+**Outbound to Bifrost only:** `live.up` (see the `live` channel below).
 
 When `PLUGIN_BIFORESTING_LINK` is enabled, the dashboard WS also broadcasts `biforesting.link.connected`, `biforesting.link.disconnected`, `biforesting.link.metrics`, and `biforesting.link.data`.
 
@@ -246,6 +248,13 @@ Every frame is HMAC-SHA256 authenticated with the same PSK-derived key as Bifros
 - `registry` (once on connect) — item id → numericId map; persisted to `biforesting_registry`.
 - `quest` (UP on change; DOWN authoritative) — per-team SNBT; persisted to `biforesting_quests`.
 - `chunks` (UP on change; DOWN authoritative) — per-team land claims; persisted to `biforesting_chunks`.
+- `live` (both ways, policy feature `live` = `0x200000`): a generic event bus between the mod and
+  the Bifrost proxy. Payload `[varint 1][utf json]`, JSON `{"t": topic, "p": uuid or "", "d": {...}}`.
+  Yggdrasil relays UP frames to the proxy as `live.up` `{instanceKey, serverId, tag, topic, player, data, at}`
+  and sends the proxy's `live.down` `{server, topic, player, data}` DOWN (`server` = serverId,
+  instanceKey, tag, or `"*"` for every session with the bit). Non-durable: no queue, no retry. Frames
+  over 16 KiB, frames with the bit off, frames for an unknown server and UP frames over the
+  per-session cap (20/s, burst 40) are dropped. `GET /v1/biforesting/link` shows the counts.
 
 > **Security:** the link is plaintext TCP — HMAC provides integrity/authenticity, not confidentiality.
 > Firewall `BIFORESTING_LINK_PORT` to backend hosts only and keep the PSK secret.
