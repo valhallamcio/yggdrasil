@@ -116,6 +116,10 @@ export class OpsStore {
     return this.col().findOne({ _id: opId });
   }
 
+  async getByIdempotencyKey(key: string): Promise<OpDoc | null> {
+    return this.col().findOne({ idempotencyKey: key });
+  }
+
   async list(filter: { instanceKey?: string; state?: OpState; type?: string }, limit = 50): Promise<OpDoc[]> {
     const q: Record<string, unknown> = {};
     if (filter.instanceKey) q['instanceKey'] = filter.instanceKey;

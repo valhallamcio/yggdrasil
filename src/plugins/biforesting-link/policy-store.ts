@@ -72,6 +72,8 @@ export const FEATURE_BITS: Record<string, number> = {
   shutdown_guard: 0x100000,
   // Live bus (biforesting:live), see live.ts.
   live: 0x200000,
+  // take_slot op (Bifrost trade, 1.20.5+ stacks with data). Modern trees advertise it.
+  take_slot: 0x400000,
 };
 
 export function maskForFeatures(names: string[]): number {

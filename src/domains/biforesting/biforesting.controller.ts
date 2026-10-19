@@ -366,7 +366,10 @@ export class BiforestingController {
     }
 
     if (entry.requiresFeature) {
-      await assertFeatureGranted(identity.instanceKey, entry.requiresFeature, server);
+      // A key that already has an op replays it below, even when the bit is gone now. So this
+      // refusal proves no op exists under the key, and a caller may read it as "never ran".
+      const replays = body.idempotencyKey ? (await opsStore.getByIdempotencyKey(body.idempotencyKey)) !== null : false;
+      if (!replays) await assertFeatureGranted(identity.instanceKey, entry.requiresFeature, server);
     }
     // Profiler captures: the tier B budget holds here too, so this path is no bypass.
     let execTimeoutMs = body.execTimeoutMs;

@@ -372,6 +372,21 @@ export const OPS_CATALOG: Record<string, OpCatalogEntry> = {
     description:
       "Take exactly `count` of one item from an ONLINE player's main inventory, all or nothing. A stack matches on registry id, damage, and a tag equal to `nbt` (no `nbt` = no tag). `num` also pins the numeric id this backend uses. Result `{player, requested, taken, removed}`; a shortfall fails with code `not_applied` and takes nothing.",
   },
+  take_slot: {
+    params: z
+      .object({
+        slot: z.number().int().min(0).max(35),
+        id: z.string().min(1).max(256),
+        count: z.number().int().min(1).max(2304),
+        num: z.number().int().min(0).max(2_147_483_647).optional(),
+      })
+      .strict(),
+    serverGlobal: false,
+    risk: 'reversible',
+    requiresFeature: 'take_slot',
+    description:
+      "Take `count` from one main-inventory slot of an ONLINE player (`slot` 0-8 hotbar, 9-35 main), all or nothing. The stack must have the registry id (and `num`, when given) and at least `count` items. Result `{player, requested, taken, slot, nbt?}`: `nbt` is the stack's data as base64 binary NBT in the format give_item reads, absent when the stack has none. A refusal fails with code `not_applied` and takes nothing.",
+  },
   teleport: {
     params: z
       .object({
