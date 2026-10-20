@@ -5,6 +5,8 @@ import assert from 'node:assert/strict';
 import { startTestMongo, type TestMongo } from '../helpers/mongo.ts';
 import {
   getPolicy,
+  inheritedKey,
+  resolvePolicy,
   setPolicy,
   setPolicyDbProvider,
   maskForFeatures,
@@ -88,4 +90,74 @@ test('policy-store: a doc stored before enabledFixes existed reads as no fixes',
   const read = await getPolicy('pre-fixes');
   assert.deepEqual(read.enabledFixes, []);
   assert.equal(read.enabledFeatures, 0x10);
+});
+
+// The resolver keys a server by `tag` while one doc has the tag and by `tag:serverId` once a
+// second doc shares it. A grouped key with no doc of its own reads the tag doc.
+
+test('policy-store: inheritedKey splits a grouped key and leaves a plain tag alone', () => {
+  assert.equal(inheritedKey('onyx:1a2b3c4d'), 'onyx');
+  assert.equal(inheritedKey('onyx'), null);
+  assert.equal(inheritedKey(':1a2b3c4d'), null);
+  assert.equal(inheritedKey('onyx:'), null);
+});
+
+test('policy-store: a single instance reads its own tag doc', async () => {
+  await setPolicy('solo', { enabledFeatures: 0x30, metricsHz: 1 }, 'a');
+  const { policy, sourceKey } = await resolvePolicy('solo');
+  assert.equal(sourceKey, 'solo');
+  assert.equal(policy.enabledFeatures, 0x30);
+  assert.equal(policy.metricsHz, 1);
+});
+
+test('policy-store: both keys of a new sibling pair read the tag doc', async () => {
+  await setPolicy('onyx', { enabledFeatures: 0x40bc60, metricsHz: 1, enabledFixes: ['biforesting-canary'] }, 'a');
+  const tag = await getPolicy('onyx');
+  for (const key of ['onyx:sid00001', 'onyx:sid00002']) {
+    const { policy, sourceKey } = await resolvePolicy(key);
+    assert.equal(sourceKey, 'onyx', key);
+    assert.deepEqual(policy, tag, `${key} keeps the tag grant`);
+  }
+});
+
+test('policy-store: a grouped key with no doc and no tag doc reads ZERO', async () => {
+  const { policy, sourceKey } = await resolvePolicy('nodoc:sid00001');
+  assert.equal(sourceKey, null);
+  assert.deepEqual(policy, ZERO_POLICY);
+});
+
+test('policy-store: an own per-instance doc wins over the tag doc', async () => {
+  await setPolicy('evol', { enabledFeatures: 0x30 }, 'a');
+  await mongo.client.db('ygg_policy_test').collection('biforesting_policies').insertOne({
+    instanceKey: 'evol:sid00001',
+    enabledFeatures: 0x10,
+    metricsHz: 0,
+    questHz: 0,
+    chunkHz: 0,
+    enabledFixes: [],
+  });
+  const own = await resolvePolicy('evol:sid00001');
+  assert.equal(own.sourceKey, 'evol:sid00001');
+  assert.equal(own.policy.enabledFeatures, 0x10);
+  assert.equal((await getPolicy('evol:sid00002')).enabledFeatures, 0x30, 'the sibling still inherits');
+});
+
+test('policy-store: a write to an inheriting key starts from the tag doc', async () => {
+  await setPolicy('gto', { enabledFeatures: 0xbc60, metricsHz: 1, questHz: 2, enabledFixes: ['gregtech-recipe-cache'] }, 'a');
+  const doc = await setPolicy('gto:sid00001', { metricsHz: 5 }, 'b');
+  assert.equal(doc.instanceKey, 'gto:sid00001');
+  assert.equal(doc.enabledFeatures, 0xbc60, 'the inherited bits survive a cadence-only write');
+  assert.equal(doc.metricsHz, 5);
+  assert.equal(doc.questHz, 2);
+  assert.deepEqual(doc.enabledFixes, ['gregtech-recipe-cache']);
+
+  await setPolicy('gto', { enabledFeatures: 0x10 }, 'c');
+  assert.equal((await getPolicy('gto:sid00001')).enabledFeatures, 0xbc60, 'the own doc no longer follows the tag');
+  assert.equal((await getPolicy('gto:sid00002')).enabledFeatures, 0x10, 'an inheriting sibling follows the tag');
+});
+
+test('policy-store: a write to a new grouped key with no tag doc starts from ZERO', async () => {
+  const doc = await setPolicy('fresh:sid00001', { metricsHz: 1 }, 'a');
+  assert.equal(doc.enabledFeatures, 0);
+  assert.deepEqual(doc.enabledFixes, []);
 });

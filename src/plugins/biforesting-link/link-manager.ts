@@ -10,7 +10,7 @@ import { saveQuests, saveChunks } from './persistence.js';
 import { saveItemRegistry } from './item-registry-store.js';
 import { decodeSpike } from './profile-spike.js';
 import { storeSpikeReport } from './profile-store.js';
-import { getPolicy, ZERO_POLICY } from './policy-store.js';
+import { getPolicy, inheritedKey, resolvePolicy, ZERO_POLICY } from './policy-store.js';
 import { serverResolver } from './server-resolver.js';
 import {
   LIVE_CHANNEL,
@@ -499,7 +499,26 @@ class BiforestingLinkManager {
    */
   async resendRegAck(server: string): Promise<boolean> {
     const s = this.getSessionByServer(server);
-    if (!s || !s.identity) return false;
+    return s ? this.reAck(s) : false;
+  }
+
+  /**
+   * Re-send reg_ack to every live session that reads the tag doc `tag` (a `tag:serverId` key
+   * with no doc of its own). A change of the tag doc changes their grant too. Returns the count.
+   */
+  async resendRegAckInheriting(tag: string): Promise<number> {
+    let sent = 0;
+    for (const s of [...this.sessions.values()]) {
+      const key = s.identity?.resolved ? s.identity.instanceKey : null;
+      if (!key || inheritedKey(key) !== tag) continue;
+      if ((await resolvePolicy(key)).sourceKey !== tag) continue;
+      if (await this.reAck(s)) sent++;
+    }
+    return sent;
+  }
+
+  private async reAck(s: Session): Promise<boolean> {
+    if (!s.identity) return false;
     const identity = s.identity;
     const sent = await this.sendRegAck(s, identity.serverId ?? identity.linkServerId, identity.name ?? '');
     // Player sync: a grant of player_sync drives the sync work that waited for it, as a link-up does.

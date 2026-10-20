@@ -1,7 +1,7 @@
 import type { Request, Response } from 'express';
 import { biforestingLinkManager } from '../../plugins/biforesting-link/link-manager.js';
 import { encodeQuestDown, encodeChunksDown } from '../../plugins/biforesting-link/decoders.js';
-import { getPolicy, setPolicy, maskForFeatures, featureNamesForMask, normalizeFixIds } from '../../plugins/biforesting-link/policy-store.js';
+import { resolvePolicy, setPolicy, maskForFeatures, featureNamesForMask, normalizeFixIds, inheritedKey } from '../../plugins/biforesting-link/policy-store.js';
 import { opDispatcher, opsStore, compoundOps, fanOutOpUpdate } from '../../plugins/biforesting-link/ops-runtime.js';
 import { COMPOUND_TYPES } from '../../plugins/biforesting-link/compound-ops.js';
 import { latestSnapshot, listSnapshots, getSnapshot } from '../../plugins/biforesting-link/inv-store.js';
@@ -264,15 +264,19 @@ export class BiforestingController {
     res.json({ data: { instanceKey: identity.instanceKey, res: 'raw', count: points.length, points } });
   };
 
-  /** The stored link policy for a server (ZERO for unknown — features default off). */
+  /**
+   * The link policy a server runs (ZERO for unknown — features default off). `inheritedFrom`
+   * names the tag doc when a `tag:serverId` key has no doc of its own.
+   */
   getPolicy = async (req: Request, res: Response): Promise<void> => {
     const { server } = req.params as unknown as LinkServerParams;
     const identity = await serverResolver.resolve(server);
-    const policy = await getPolicy(identity.instanceKey);
+    const { policy, sourceKey } = await resolvePolicy(identity.instanceKey);
     res.json({
       data: {
         instanceKey: identity.instanceKey,
         resolved: identity.resolved,
+        inheritedFrom: sourceKey !== null && sourceKey !== identity.instanceKey ? sourceKey : null,
         ...policy,
         features: featureNamesForMask(policy.enabledFeatures),
         liveSession: !!biforestingLinkManager.getSessionByServer(server),
@@ -311,6 +315,11 @@ export class BiforestingController {
     const actor = (req.headers['x-actor'] as string | undefined) ?? 'api';
     const doc = await setPolicy(identity.instanceKey, fields, actor);
     const reAcked = await biforestingLinkManager.resendRegAck(server);
+    // A tag doc also feeds every sibling key that has no doc of its own.
+    const reAckedInheriting =
+      inheritedKey(identity.instanceKey) === null
+        ? await biforestingLinkManager.resendRegAckInheriting(identity.instanceKey)
+        : 0;
     res.json({
       data: {
         instanceKey: identity.instanceKey,
@@ -321,6 +330,7 @@ export class BiforestingController {
         chunkHz: doc.chunkHz,
         enabledFixes: doc.enabledFixes ?? [],
         reAcked,
+        reAckedInheriting,
       },
     });
   };

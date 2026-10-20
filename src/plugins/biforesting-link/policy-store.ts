@@ -115,36 +115,74 @@ async function ensureIndex(): Promise<void> {
   }
 }
 
-/** Fail-soft: any DB problem yields ZERO_POLICY (features stay off — never fail open). */
-export async function getPolicy(instanceKey: string): Promise<Omit<LinkPolicyDoc, 'instanceKey'>> {
+/**
+ * The tag doc a grouped key inherits from: `onyx:1a2b3c4d` reads `onyx`. Null for a plain tag key.
+ * The resolver keys a server by `tag` while one server doc has the tag, and by `tag:serverId`
+ * once a second doc shares it. A grouped key with no doc of its own reads the tag doc, so the
+ * first server keeps its grant when a sibling appears.
+ */
+export function inheritedKey(instanceKey: string): string | null {
+  const i = instanceKey.lastIndexOf(':');
+  return i > 0 && i < instanceKey.length - 1 ? instanceKey.slice(0, i) : null;
+}
+
+function policyOf(doc: LinkPolicyDoc): Omit<LinkPolicyDoc, 'instanceKey'> {
+  return {
+    enabledFeatures: doc.enabledFeatures ?? 0,
+    metricsHz: doc.metricsHz ?? 0,
+    questHz: doc.questHz ?? 0,
+    chunkHz: doc.chunkHz ?? 0,
+    enabledFixes: doc.enabledFixes ?? [],
+  };
+}
+
+/** The key's own doc, else its tag doc. Null when neither exists. Throws on a DB problem. */
+async function findEffective(instanceKey: string): Promise<LinkPolicyDoc | null> {
+  const own = await policiesCol().findOne({ instanceKey });
+  if (own) return own;
+  const parent = inheritedKey(instanceKey);
+  return parent ? policiesCol().findOne({ instanceKey: parent }) : null;
+}
+
+/**
+ * The policy and the key of the doc it came from (`sourceKey`: the key itself, its tag, or null
+ * for ZERO). Fail-soft: any DB problem yields ZERO_POLICY (features stay off — never fail open).
+ */
+export async function resolvePolicy(
+  instanceKey: string,
+): Promise<{ policy: Omit<LinkPolicyDoc, 'instanceKey'>; sourceKey: string | null }> {
   try {
     await ensureIndex();
-    const doc = await policiesCol().findOne({ instanceKey });
-    if (!doc) return ZERO_POLICY;
-    return {
-      enabledFeatures: doc.enabledFeatures ?? 0,
-      metricsHz: doc.metricsHz ?? 0,
-      questHz: doc.questHz ?? 0,
-      chunkHz: doc.chunkHz ?? 0,
-      enabledFixes: doc.enabledFixes ?? [],
-    };
+    const doc = await findEffective(instanceKey);
+    return doc ? { policy: policyOf(doc), sourceKey: doc.instanceKey } : { policy: ZERO_POLICY, sourceKey: null };
   } catch (err) {
     logger.warn({ err, instanceKey }, 'biforesting-link: policy lookup failed — using ZERO policy');
-    return ZERO_POLICY;
+    return { policy: ZERO_POLICY, sourceKey: null };
   }
 }
 
+/** Fail-soft: any DB problem yields ZERO_POLICY (features stay off — never fail open). */
+export async function getPolicy(instanceKey: string): Promise<Omit<LinkPolicyDoc, 'instanceKey'>> {
+  return (await resolvePolicy(instanceKey)).policy;
+}
+
+/**
+ * Upsert a key's own doc. A new grouped key starts from its tag doc (or ZERO), so a write of
+ * one field keeps the grant the key inherited until then.
+ */
 export async function setPolicy(
   instanceKey: string,
   fields: Partial<Omit<LinkPolicyDoc, 'instanceKey' | 'updatedAt' | 'updatedBy'>>,
   updatedBy: string,
 ): Promise<LinkPolicyDoc> {
   await ensureIndex();
+  const effective = await findEffective(instanceKey);
+  const seed = effective ? policyOf(effective) : ZERO_POLICY;
   const update = {
     $set: { ...fields, updatedAt: new Date(), updatedBy },
     $setOnInsert: {
       instanceKey,
-      ...Object.fromEntries(Object.entries(ZERO_POLICY).filter(([k]) => !(k in fields))),
+      ...Object.fromEntries(Object.entries(seed).filter(([k]) => !(k in fields))),
     },
   };
   await policiesCol().updateOne({ instanceKey }, update, { upsert: true });
