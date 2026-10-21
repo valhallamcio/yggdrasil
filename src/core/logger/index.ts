@@ -1,5 +1,6 @@
 import pino from 'pino';
 import { config } from '../../config/index.js';
+import { rememberLine } from './recent-lines.js';
 
 export const logger = pino({
   level: config.LOG_LEVEL,
@@ -10,6 +11,7 @@ export const logger = pino({
     },
   }),
   base: { env: config.NODE_ENV },
+  hooks: { streamWrite: rememberLine },
 });
 
 export type Logger = typeof logger;

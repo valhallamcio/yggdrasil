@@ -1,5 +1,6 @@
 import type { Server as HttpServer } from 'node:http';
 import { logger } from '../logger/index.js';
+import { writeCrashReport } from './crash-report.js';
 import { disconnectDatabase } from '../database/client.js';
 import { schedulerRegistry } from '../scheduler/index.js';
 import { pluginRegistry } from '../../plugins/index.js';
@@ -60,11 +61,13 @@ export function registerGracefulShutdown(server: HttpServer): void {
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
   process.on('uncaughtException', (err) => {
-    logger.fatal({ err }, 'Uncaught exception');
+    const report = writeCrashReport('uncaughtException', err);
+    logger.fatal({ err, report }, 'Uncaught exception');
     void shutdown('uncaughtException');
   });
   process.on('unhandledRejection', (reason) => {
-    logger.fatal({ reason }, 'Unhandled promise rejection');
+    const report = writeCrashReport('unhandledRejection', reason);
+    logger.fatal({ reason, report }, 'Unhandled promise rejection');
     void shutdown('unhandledRejection');
   });
 }

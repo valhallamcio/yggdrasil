@@ -8,7 +8,7 @@ Central REST API hub for the ValhallaMC Minecraft network. Aggregates data from 
 - **Framework:** Express 4
 - **Database:** MongoDB (native driver)
 - **Validation:** Zod (config + request schemas)
-- **Logging:** Pino (structured JSON logs)
+- **Logging:** Pino (structured JSON logs). An uncaught exception or unhandled rejection also writes `logs/crash-<time>.log` (the error, its stack and the last 200 log lines), so the cause survives the container restart
 - **Scheduling:** node-cron
 - **Plugins:** Discord.js, ws (WebSocket)
 
