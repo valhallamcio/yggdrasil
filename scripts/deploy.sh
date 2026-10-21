@@ -63,8 +63,10 @@ K=$(head -c16 /dev/urandom | base64)
 for i in 1 2 3 4 5 6; do
   # MUST be a real HTTP/1.1 upgrade: a plain GET 404s even when healthy (noServer + manual
   # 'upgrade' handler), and curl defaults to HTTP/2 where Upgrade is meaningless.
+  # A live listener keeps the socket open after the 101, so curl ends on --max-time (exit 28).
+  # `|| true` keeps set -e + pipefail from killing the loop before the 101 check.
   line=$(curl -s -i -N --http1.1 --max-time 10 -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
-          -H "Sec-WebSocket-Key: $K" -H 'Sec-WebSocket-Version: 13' "$YGG_URL/biforesting/" 2>/dev/null | head -1)
+          -H "Sec-WebSocket-Key: $K" -H 'Sec-WebSocket-Version: 13' "$YGG_URL/biforesting/" 2>/dev/null | head -1 || true)
   echo "  attempt $i: ${line:-no response}"
   case "$line" in *101*) echo "  OK — link listener live"; exit 0 ;; esac
   sleep 5
