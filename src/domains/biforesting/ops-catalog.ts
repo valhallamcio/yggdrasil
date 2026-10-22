@@ -503,6 +503,14 @@ export const OPS_CATALOG: Record<string, OpCatalogEntry> = {
     description:
       'Upload the artifacts of a capture that is already on the server (spike dumps, command captures, failed uploads) to /v1/biforesting/:server/profiles. The result lists uploaded, missing, alreadyStored and uploadErrors.',
   },
+  // bifrost-lib docs/invariants/end-reset.md. The mod gates it by the ops bit only.
+  end_reset_plan: {
+    params: z.object({}).strict(),
+    serverGlobal: true,
+    risk: 'safe',
+    description:
+      'End reset dry run. The mod reads the End files on disk on a worker thread and writes config/biforesting/end-reset/plan.json. It changes nothing else. The result holds planId, planSha256, path, totals, unsupported and backupBytes.',
+  },
   account_reset: {
     requiresConfirm: true,
     params: z
