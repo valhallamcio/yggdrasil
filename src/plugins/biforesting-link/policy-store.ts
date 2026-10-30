@@ -75,8 +75,10 @@ export const FEATURE_BITS: Record<string, number> = {
   live: 0x200000,
   // take_slot op (Bifrost trade, 1.20.5+ stacks with data). Modern trees advertise it.
   take_slot: 0x400000,
-  // Live off switch of the shutdown guard. A grant turns off its arm, exit and hang halt; a reg_ack
-  // without it turns them back on. Every guard tree but Paper advertises it.
+  // Live off switch of the shutdown guard. A grant turns off its stop deadline, stop sampler and hang
+  // halt. The exit after the server loop stays on: only exitAfterStop false in the mod's guard.json
+  // turns it off. The mod latches the bit. Only an accepted reg_ack that grants another bit and not
+  // this one clears it; a rejected or empty reg_ack keeps it. Every guard tree but Paper advertises it.
   shutdown_guard_off: 0x800000,
 };
 
