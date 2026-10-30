@@ -68,12 +68,16 @@ export const FEATURE_BITS: Record<string, number> = {
   spike_catcher: 0x40000,
   // Player sync (bifrost-lib docs/invariants/player-sync.md). Only the 26.1.2 tree advertises it.
   player_sync: 0x80000,
-  // Reserved for the shutdown guard. Nothing reads it yet.
+  // Shutdown guard marker. Guard jars advertise it so the caps show which jars have the guard.
+  // A grant changes nothing: the guard is on by default (bifrost-lib docs/invariants/shutdown-guard.md).
   shutdown_guard: 0x100000,
   // Live bus (biforesting:live), see live.ts.
   live: 0x200000,
   // take_slot op (Bifrost trade, 1.20.5+ stacks with data). Modern trees advertise it.
   take_slot: 0x400000,
+  // Live off switch of the shutdown guard. A grant turns off its arm, exit and hang halt; a reg_ack
+  // without it turns them back on. Every guard tree but Paper advertises it.
+  shutdown_guard_off: 0x800000,
 };
 
 export function maskForFeatures(names: string[]): number {
