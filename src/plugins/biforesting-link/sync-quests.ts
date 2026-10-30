@@ -58,6 +58,9 @@ const LOCK_SLACK_MS = 5_000;
 /** After these op states nothing more happens for a REST call. A `waiting_player` op gets cancelled. */
 const ENDED: ReadonlySet<OpState> = new Set(['completed', 'failed', 'cancelled', 'expired', 'waiting_player']);
 
+/** End states without a success. An op in one of them never runs again. */
+const NOT_DONE_ENDS: ReadonlySet<OpState> = new Set(['failed', 'cancelled', 'expired']);
+
 /**
  * The `message` lines of the answers. Bifrost shows its own text per code and never shows
  * `message`. The mod's own text never goes out: it can hold Java exception text.
@@ -586,10 +589,14 @@ export class SyncQuests {
       const cancelled = await this.deps.ops.cancel(end._id, 'sync-quests');
       throw new QuestOpError(409, 'player_offline', QUEST_MESSAGES.playerOffline, cancelled === null, details);
     }
-    // A cancelled op never goes out again. It may still run only if a dispatch reached a JVM that
-    // did not defer it. A failed cancel means the op went on (acked) since the read.
-    const closed = ENDED.has(end.state) ? end : await this.deps.ops.cancel(end._id, 'sync-quests (no result in time)');
-    throw timeout(closed === null || !provablyUnrun(closed), details);
+    // A cancelled op never goes out again. A failed cancel means the op changed since the read
+    // (acked, or expired by the sweep), so it is read again.
+    const closed = ENDED.has(end.state)
+      ? end
+      : ((await this.deps.ops.cancel(end._id, 'sync-quests (no result in time)')) ?? (await this.deps.ops.get(end._id)));
+    // It can no longer run when it ended without a result and no dispatch reached a JVM that kept it.
+    const settled = closed !== null && NOT_DONE_ENDS.has(closed.state) && provablyUnrun(closed);
+    throw timeout(!settled, details);
   }
 
   /** Dispatches `op` and waits until it reaches an end state or the `deadline` passes. */

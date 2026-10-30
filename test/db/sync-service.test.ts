@@ -64,7 +64,7 @@ before(async () => {
           .filter(([, m]) => m.group === group)
           .map(([serverId, m]): GroupMember => ({ serverId, instanceNumber: m.instanceNumber, name: serverId })),
     },
-    { instance: async (serverId) => live.get(serverId) ?? null },
+    { instance: async (serverId) => live.get(serverId) ?? null, connected: async (serverId) => live.has(serverId) },
   );
   await groups.upsert('evol', { mode: 'shadow' }, 'test');
   await groups.upsert('shgrp', { mode: 'shadow' }, 'test');

@@ -28,8 +28,14 @@ export interface SyncInstanceLink {
 
 /** Live link facts by Pterodactyl serverId (the link manager in production). */
 export interface SyncLinkPort {
-  /** Null when the instance has no live, resolved session. */
+  /** Null when the instance has no session that takes ops. Sync work needs one. */
   instance(serverId: string): Promise<SyncInstanceLink | null>;
+  /**
+   * True while any resolved session of the instance is connected, also one without the ops grant
+   * or one that stops. The server runs, so its players may be online. Safety checks that skip a
+   * dead member read this, never {@link instance}.
+   */
+  connected(serverId: string): Promise<boolean>;
 }
 
 /** One instance of one group. */

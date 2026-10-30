@@ -17,8 +17,8 @@ import { SyncMovesStore } from '../../src/plugins/biforesting-link/sync-moves-st
 import { SyncWorldDataStore } from '../../src/plugins/biforesting-link/sync-worlddata-store.ts';
 import { SyncQuestMergesStore, questMergeId, type SyncQuestMergeDoc } from '../../src/plugins/biforesting-link/sync-quest-merges-store.ts';
 import { SyncRunner, SyncConflictError, SYNC_MESSAGES, type SyncRunnerDirectory } from '../../src/plugins/biforesting-link/sync-runner.ts';
-import { SyncQuests, QuestOpError, QUEST_MESSAGES, type SyncQuestsTiming } from '../../src/plugins/biforesting-link/sync-quests.ts';
-import type { SyncInstanceLink } from '../../src/plugins/biforesting-link/sync-service.ts';
+import { SyncQuests, QuestOpError, QUEST_MESSAGES, type SyncQuestsDeps, type SyncQuestsTiming } from '../../src/plugins/biforesting-link/sync-quests.ts';
+import type { SyncInstanceLink, SyncLinkPort } from '../../src/plugins/biforesting-link/sync-service.ts';
 import type { GroupMember } from '../../src/plugins/biforesting-link/server-resolver.ts';
 import type { OpDoc, OpTarget } from '../../src/plugins/biforesting-link/types.ts';
 import { AppError } from '../../src/shared/errors/index.ts';
@@ -91,13 +91,18 @@ const directory: SyncRunnerDirectory = {
   instanceOf: async (serverId) => (memberships.has(serverId) ? { instanceKey: ik(serverId), tag: memberships.get(serverId)!.group } : null),
 };
 
-function mkQuests(timing: Partial<SyncQuestsTiming>): SyncQuests {
+const linkPort: SyncLinkPort = {
+  instance: async (serverId) => links.get(serverId) ?? null,
+  connected: async (serverId) => links.has(serverId),
+};
+
+function mkQuests(timing: Partial<SyncQuestsTiming>, ops: SyncQuestsDeps['ops'] = store): SyncQuests {
   return new SyncQuests({
     stores: { groups, ledger, merges, snapshots },
-    ops: store,
+    ops,
     dispatch: dispatcher,
     directory,
-    links: { instance: async (serverId) => links.get(serverId) ?? null },
+    links: linkPort,
     timing,
   });
 }
@@ -128,7 +133,7 @@ before(async () => {
     ops: store,
     dispatch: dispatcher,
     directory,
-    links: { instance: async (serverId) => links.get(serverId) ?? null },
+    links: linkPort,
     holder: 'test-runner',
     schedule: () => undefined,
   });
@@ -427,6 +432,37 @@ test('action: an op the stopping owner deferred is cancelled at the deadline; it
     liveKeys.add(s.instanceKey);
   }
   assert.equal((await opDoc(s.opId)).state, 'cancelled');
+  assert.equal((await ledger.get('qg', u))?.lease, null, 'the lock is gone');
+});
+
+test('action: the sweep expires a deferred op just before the cancel; it never ran, so the lock goes', async () => {
+  const u = newUuid();
+  await seed(u, Q1);
+  const racing = mkQuests(
+    { statusMs: 700, actionMs: 700, candidatesMs: 700, mergeMs: 1_500, pollMs: 25 },
+    {
+      create: (input) => store.create(input),
+      get: (opId) => store.get(opId),
+      cancel: async (opId, by) => {
+        await store.markExpired(opId);
+        return store.cancel(opId, by);
+      },
+    },
+  );
+  const p = racing.action('qg', u, { action: 'fresh' }, 'test');
+  const s = await nextSent('quests_action', Q1);
+  liveKeys.delete(s.instanceKey);
+  try {
+    await dispatcher.onOpRes(s.instanceKey, { opId: s.opId, phase: 'result', status: 'deferred', code: 'server_stopping' }, { sessionId: s.instanceKey, bootNonce: s.instanceKey });
+    await assert.rejects(p, (err: unknown) => {
+      assert.ok(err instanceof QuestOpError);
+      assert.deepEqual([err.code, err.unsettled], ['timeout', false]);
+      return true;
+    });
+  } finally {
+    liveKeys.add(s.instanceKey);
+  }
+  assert.equal((await opDoc(s.opId)).state, 'expired');
   assert.equal((await ledger.get('qg', u))?.lease, null, 'the lock is gone');
 });
 

@@ -25,7 +25,7 @@ import {
   type SyncRunnerDeps,
   type SyncRunnerDirectory,
 } from '../../src/plugins/biforesting-link/sync-runner.ts';
-import { SyncService, type SyncInstanceLink, type SyncLiveHooks } from '../../src/plugins/biforesting-link/sync-service.ts';
+import { SyncService, type SyncInstanceLink, type SyncLinkPort, type SyncLiveHooks } from '../../src/plugins/biforesting-link/sync-service.ts';
 import type { GroupMember } from '../../src/plugins/biforesting-link/server-resolver.ts';
 import type { LinkIdentity, OpDoc, SyncStamp, SyncWorldDataEntry } from '../../src/plugins/biforesting-link/types.ts';
 
@@ -73,6 +73,12 @@ const GRANT = maskForFeatures(['play_transport', 'ops', 'player_sync']);
 
 /** Live link facts by serverId. Every member is live with player_sync and one fingerprint. */
 const links = new Map<string, SyncInstanceLink>();
+/** Members whose server runs with a session that takes no ops (the ops bit is off). */
+const upOnly = new Set<string>();
+const linkPort: SyncLinkPort = {
+  instance: async (serverId) => links.get(serverId) ?? null,
+  connected: async (serverId) => links.has(serverId) || upOnly.has(serverId),
+};
 
 const sent: Array<{ instanceKey: string; opId: string; type: string; params: Record<string, unknown>; blob: Buffer | null }> = [];
 const liveKeys = new Set<string>();
@@ -103,7 +109,7 @@ function mkRunner(holder: string): SyncRunner {
     ops: store,
     dispatch: dispatcher,
     directory,
-    links: { instance: async (serverId) => links.get(serverId) ?? null },
+    links: linkPort,
     holder,
     now,
     schedule: () => undefined,
@@ -138,7 +144,7 @@ before(async () => {
     onReleaseSnapshot: (...args) => current.onReleaseSnapshot(...args),
     onMemberLinkUp: (...args) => current.onMemberLinkUp(...args),
   };
-  service = new SyncService({ groups, ledger, snapshots, shadow: new SyncShadowStore(() => db) }, directory, { instance: async (s) => links.get(s) ?? null }, hooks);
+  service = new SyncService({ groups, ledger, snapshots, shadow: new SyncShadowStore(() => db) }, directory, linkPort, hooks);
   for (const serverId of memberships.keys()) {
     await setPolicy(ik(serverId), { enabledFeatures: GRANT }, 'test');
     links.set(serverId, { instanceKey: ik(serverId), grantedFeatures: GRANT, fp: FP });
@@ -1408,6 +1414,59 @@ test('force-release: a stuck ledger goes on past a dead old member and leaves it
   }
 });
 
+/** A ledger left stuck by two failed applies of a move from A to B. Returns the release snapshot. */
+async function stuckAfterApply(u: string): Promise<string> {
+  await seed(u, A, 0);
+  const { id } = await toApply(u);
+  for (let i = 0; i < 2; i++) {
+    await answer(await lastOp(u, 'sync_apply'), 'failed', undefined, 'handler_failed');
+    await answer(await lastOp(u, 'sync_probe'), 'completed', { online: false, datExists: true, fp: FP });
+  }
+  assert.equal((await ledger.get('evol', u))?.state, 'stuck');
+  return (await moveOf(id)).snapshotId!;
+}
+
+/** B runs, but staff turned its ops bit off: its session takes no op, and the player may play there. */
+async function withBUpWithoutOps(fn: () => Promise<void>): Promise<void> {
+  liveKeys.delete(ik(B));
+  links.delete(B);
+  upOnly.add(B);
+  try {
+    await fn();
+  } finally {
+    upOnly.delete(B);
+    liveKeys.add(ik(B));
+    links.set(B, { instanceKey: ik(B), grantedFeatures: GRANT, fp: FP });
+  }
+}
+
+test('force-release: a stuck ledger refuses while the player is on a member that runs without the ops grant', async () => {
+  const u = newUuid();
+  const snapshotId = await stuckAfterApply(u);
+  await join(B, u);
+  const doc = await ledger.get('evol', u);
+  assert.deepEqual([doc?.state, doc?.lastSeen?.serverId, doc?.lastSeen?.event], ['stuck', B, 'join']);
+  await withBUpWithoutOps(async () => {
+    const err = await rejectsWith(current.forceRelease('evol', u, { to: C, snapshotId }, 'staff'), 'player_online');
+    assert.equal((err.details as { serverId: string }).serverId, B);
+    assert.equal(await db.collection('biforesting_sync_moves').countDocuments({ uuid: u, kind: 'force_release' }), 0);
+  });
+});
+
+test('force-release: the disown gate of a stuck ledger waits for a member that runs without the ops grant', async () => {
+  const u = newUuid();
+  const snapshotId = await stuckAfterApply(u);
+  await withBUpWithoutOps(async () => {
+    const view = await current.forceRelease('evol', u, { to: C, snapshotId }, 'staff');
+    await answer((await gateOp('sync_disown', A, view.id))!, 'completed', { marked: 1, skipped: 0 });
+    await current.sweep();
+    await current.idle();
+    assert.equal((await gateOp('sync_disown', B, view.id))?.state, 'pending');
+    assert.equal((await opsOf(u, 'sync_apply')).some((op) => op.instanceKey === ik(C)), false, 'no apply while B may still hold the player');
+    assert.equal((await moveOf(view.id)).step, 'disown');
+  });
+});
+
 test('force-release: a failed apply after the disowns goes stuck; a cancel before any disown left puts the ledger back', async () => {
   const u = newUuid();
   await committedOnB(u);
@@ -1494,7 +1553,7 @@ function runnerWith(dispatch: SyncRunnerDeps['dispatch'], ledgerStore: SyncLedge
     ops: store,
     dispatch,
     directory,
-    links: { instance: async (serverId) => links.get(serverId) ?? null },
+    links: linkPort,
     holder: 'test-1',
     now,
     schedule: () => undefined,
@@ -1600,7 +1659,7 @@ test('inert: with nothing open the sweep reads once, then stops reading', async 
     ops: store,
     dispatch: dispatcher,
     directory,
-    links: { instance: async (s) => links.get(s) ?? null },
+    links: linkPort,
     holder: 'quiet',
     now,
     schedule: () => undefined,

@@ -268,6 +268,8 @@ test('a session takes ops only after its reg_ack granted them: a hello alone get
   await lm.dispatch('arc#8', 'biforesting:hello', Buffer.from('a0000001', 'utf8'));
   assert.equal(lm.opSessionFor('arc'), null, 'the identity is known, but the mod has no grant yet');
   assert.equal(lm.liveInstance('a0000001'), null, 'player sync agrees with op dispatch');
+  assert.equal(lm.isConnected('a0000001'), true, 'the server runs, so its players may be online');
+  assert.equal(lm.isConnected('arc'), false, 'exact serverId only');
   await ops.opDispatcher.sweep();
   assert.deepEqual([(await ops.opsStore.get(id))?.state, opSends(a)], ['pending', 0]);
 

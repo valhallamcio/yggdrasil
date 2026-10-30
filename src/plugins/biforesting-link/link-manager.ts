@@ -802,6 +802,18 @@ class BiforestingLinkManager {
     return null;
   }
 
+  /**
+   * True while a resolved, writable session of exactly this serverId is open. Unlike
+   * {@link liveInstance} it counts a session without the ops grant and one that stops: that
+   * server runs, and its players may be online.
+   */
+  isConnected(serverId: string): boolean {
+    for (const s of this.sessions.values()) {
+      if (s.identity?.resolved && s.identity.serverId === serverId && s.transport.writable()) return true;
+    }
+    return false;
+  }
+
   getLastDataVersion(server: string): number | null {
     return this.getSessionByServer(server)?.lastDataVersion ?? null;
   }

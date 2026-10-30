@@ -39,7 +39,7 @@ export class BiforestingController {
   /**
    * The player's inventory NOW when the backend is linked (inspect_inventory op, ~8 s
    * long-poll), else the newest stored snapshot marked {@code stale:true}. Transparent to the
-   * caller — no online/offline mode flag (plan D6 spirit). Linked means a session takes ops: a
+   * caller. No online/offline mode flag (plan D6 spirit). Linked means a session takes ops: a
    * stopping server answers from the snapshot at once and leaves no op behind.
    */
   getPlayerInventory = async (req: Request, res: Response): Promise<void> => {

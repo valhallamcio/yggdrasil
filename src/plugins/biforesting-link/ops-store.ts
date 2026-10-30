@@ -65,7 +65,7 @@ export const SERVER_STOPPING = 'server_stopping';
 export const TOO_MANY_DEFERRALS = 'too_many_deferrals';
 
 /** Every state an op can fail from. */
-const FAILABLE_STATES: OpState[] = ['pending', 'dispatched', 'acked', 'waiting_player'];
+const FAILABLE_STATES: OpState[] = [...PRE_ACK_STATES, 'acked'];
 
 /** Extra parts of one guarded transition. */
 interface TransitionOpts {

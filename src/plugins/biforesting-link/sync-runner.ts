@@ -816,7 +816,7 @@ export class SyncRunner implements SyncLiveHooks {
     const seenOn = seen && seen.serverId !== to && isMember(seen.serverId) ? seen.serverId : null;
     if (seen && seenOn && seen.event !== 'quit') {
       const link = await this.deps.links.instance(seenOn);
-      if (link || doc.state !== 'stuck') {
+      if (link || doc.state !== 'stuck' || (await this.deps.links.connected(seenOn))) {
         const kick = link && (link.grantedFeatures & PLAYER_SYNC) !== 0 ? await this.onlineKick(group, uuid, doc.name, seenOn, seen.at, to, members, `sync:force-release (${actor})`) : null;
         if (kick?.state !== 'completed') {
           const where = instanceLabel(members, seenOn);
@@ -1592,9 +1592,9 @@ export class SyncRunner implements SyncLiveHooks {
         g.disown = null;
         if (s.uncounted) g.uncounted++;
         notes.push(`${g.serverId} retry: ${s.why}`);
-      } else if (stuck && !(await this.deps.links.instance(g.serverId))) {
+      } else if (stuck && !(await this.deps.links.connected(g.serverId))) {
         g.done = true;
-        notes.push(`${g.serverId} has no link and the ledger is stuck: its disown stays queued`);
+        notes.push(`${g.serverId} is not connected and the ledger is stuck: its disown stays queued`);
         if (op.state !== 'pending') logger.warn({ moveId: move._id, serverId: g.serverId, opId: op._id, state: op.state }, 'biforesting-sync: force-release goes on; this disown is not queued, a later reconcile must cover it');
       }
     }
@@ -1625,7 +1625,7 @@ export class SyncRunner implements SyncLiveHooks {
     const seen = ledger.lastSeen;
     if (!seen || seen.event === 'quit' || !members.some((m) => m.serverId === seen.serverId)) return true;
     const link = await this.deps.links.instance(seen.serverId);
-    if (!link && move.before?.state === 'stuck') return true;
+    if (!link && move.before?.state === 'stuck' && !(await this.deps.links.connected(seen.serverId))) return true;
     if (!link || (link.grantedFeatures & PLAYER_SYNC) === 0) return false;
     const kick = await this.onlineKick(move.group, move.uuid, move.name, seen.serverId, seen.at, move.to, members, `sync-runner (${move.actor})`);
     return kick.state === 'completed';

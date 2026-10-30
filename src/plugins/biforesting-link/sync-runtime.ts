@@ -41,6 +41,7 @@ const links: SyncLinkPort = {
       fp: live.sync?.fp ?? null,
     };
   },
+  connected: async (serverId) => biforestingLinkManager.isConnected(serverId),
 };
 
 /** Group membership from the server resolver. An instanceKey only for an exact serverId match. */
