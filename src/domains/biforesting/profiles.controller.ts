@@ -26,6 +26,7 @@ import {
   verifyUpload,
 } from '../../plugins/biforesting-link/profile-upload.js';
 import { serverResolver } from '../../plugins/biforesting-link/server-resolver.js';
+import type { LinkIdentity } from '../../plugins/biforesting-link/types.js';
 import { ConflictError, ForbiddenError, NotFoundError, UnauthorizedError, ValidationError } from '../../shared/errors/index.js';
 import { perfettoPageHtml } from './perfetto-page.js';
 import {
@@ -47,6 +48,16 @@ import type {
 
 const VIEW_TOKEN_TTL_S = 15 * 60;
 const VIEW_AUDIENCE = 'bf-profile-view';
+
+/**
+ * Refuses a tag of several instances (PRI). Its group-level instanceKey has no live session, so
+ * an op keyed by it would never go out.
+ */
+export function assertOneInstance(identity: LinkIdentity, server: string): void {
+  if (identity.resolved && identity.serverId === null) {
+    throw new ValidationError(`Server '${server}' is a tag with several instances. Use the serverId of one instance.`);
+  }
+}
 
 /** Refuses an op type whose policy feature bit is off for the server. */
 export async function assertFeatureGranted(instanceKey: string, feature: string, server: string): Promise<void> {
@@ -124,6 +135,7 @@ function verifyViewToken(token: string): { server: string; captureId: string } |
 async function resolveKnown(server: string): Promise<{ instanceKey: string; tag: string | null }> {
   const identity = await serverResolver.resolve(server);
   if (!identity.resolved) throw new ValidationError(`Unknown server '${server}'`);
+  assertOneInstance(identity, server);
   return identity;
 }
 

@@ -12,6 +12,7 @@ import { decodeSpike } from './profile-spike.js';
 import { storeSpikeReport } from './profile-store.js';
 import { getPolicy, inheritedKey, resolvePolicy, ZERO_POLICY } from './policy-store.js';
 import { serverResolver } from './server-resolver.js';
+import { SERVER_STOPPING } from './ops-store.js';
 import {
   LIVE_CHANNEL,
   LIVE_FEATURE_BIT,
@@ -124,6 +125,11 @@ export type LiveUpSink = (msg: LiveUpMsg) => boolean;
  */
 class BiforestingLinkManager {
   private readonly sessions = new Map<string, Session>();
+  /**
+   * Stopping sessions that the next JVM's register replaced. Their JVM may still answer ops it
+   * held (`deferred`), so their op answers are read until they close. Nothing else of theirs is.
+   */
+  private readonly draining = new Map<string, Session>();
   listening = false;
   private downSeq = 0;
   private opSink: OpSink | null = null;
@@ -220,6 +226,13 @@ class BiforestingLinkManager {
   }
 
   removeSession(sessionId: string): void {
+    const replaced = this.draining.get(sessionId);
+    if (replaced) {
+      // Its disconnect event went out when the next session replaced it.
+      this.draining.delete(sessionId);
+      logger.info({ sessionId, instanceKey: replaced.identity?.instanceKey ?? null }, 'biforesting-link: replaced stopping session closed');
+      return;
+    }
     const s = this.sessions.get(sessionId);
     if (!s) return;
     this.sessions.delete(sessionId);
@@ -227,8 +240,12 @@ class BiforestingLinkManager {
       { sessionId, instanceKey: s.identity?.instanceKey ?? null, linkServerId: s.identity?.linkServerId ?? null },
       'biforesting-link: session closed',
     );
+    this.emitDisconnected(s);
+  }
+
+  private emitDisconnected(s: Session): void {
     eventBus.emit('biforesting.link.disconnected', {
-      sessionId,
+      sessionId: s.sessionId,
       linkServerId: s.identity?.linkServerId ?? null,
       instanceKey: s.identity?.instanceKey ?? null,
     });
@@ -260,7 +277,7 @@ class BiforestingLinkManager {
    * — which arrive in the same TCP burst — try to persist against it.
    */
   dispatch(sessionId: string, channel: string, payload: Buffer): Promise<void> {
-    const s = this.sessions.get(sessionId);
+    const s = this.sessions.get(sessionId) ?? this.draining.get(sessionId);
     if (!s) return Promise.resolve();
     s.tail = s.tail
       .then(() => this.handle(s, channel, payload))
@@ -269,6 +286,7 @@ class BiforestingLinkManager {
   }
 
   private async handle(s: Session, channel: string, payload: Buffer): Promise<void> {
+    if (channel !== OP_RES && this.draining.has(s.sessionId)) return;
     switch (channel) {
       case HELLO:
         await this.onHello(s, payload.toString('utf8'));
@@ -318,7 +336,7 @@ class BiforestingLinkManager {
       case OP_RES:
         if (s.identity?.resolved && this.opSink) {
           const msg = decodeOpRes(payload);
-          if (msg.phase === 'result' && msg.status === 'deferred') this.markStopping(s, msg);
+          if (msg.phase === 'result' && msg.status === 'deferred' && msg.code === SERVER_STOPPING) this.markStopping(s, msg);
           await this.opSink.onOpRes(s.identity.instanceKey, msg, s.sessionId);
         }
         break;
@@ -449,15 +467,23 @@ class BiforestingLinkManager {
           instanceKey: identity.instanceKey,
           oldBootNonce: dup.register?.bootNonce ?? null,
           newBootNonce: reg.bootNonce,
+          oldStopping: dup.stopping,
         },
         'biforesting-link: register — evicting older session bound to this identity (newest wins)',
       );
-      try {
-        dup.transport.close();
-      } catch {
-        /* already gone */
+      if (dup.stopping) {
+        // Its JVM stops and may still answer `deferred` for ops it acked. It closes on its own.
+        this.sessions.delete(dup.sessionId);
+        this.draining.set(dup.sessionId, dup);
+        this.emitDisconnected(dup);
+      } else {
+        try {
+          dup.transport.close();
+        } catch {
+          /* already gone */
+        }
+        this.removeSession(dup.sessionId);
       }
-      this.removeSession(dup.sessionId);
     }
 
     const canonicalServerId = identity.serverId ?? reg.serverId;
@@ -755,12 +781,12 @@ class BiforestingLinkManager {
 
   /**
    * The live session of one Pterodactyl serverId. Exact match only: a tag or an instanceKey can
-   * name another instance of the same group.
+   * name another instance of the same group. A stopping session is not live.
    */
   liveInstance(serverId: string): { instanceKey: string; capabilities: number; sync: RegisterSync | null } | null {
     for (const s of this.sessions.values()) {
       const id = s.identity;
-      if (id?.resolved && id.serverId === serverId && s.transport.writable()) {
+      if (id?.resolved && id.serverId === serverId && !s.stopping && s.transport.writable()) {
         return { instanceKey: id.instanceKey, capabilities: s.register?.capabilities ?? 0, sync: s.register?.sync ?? null };
       }
     }
@@ -838,7 +864,7 @@ class BiforestingLinkManager {
 
   /** Close all sockets (graceful shutdown). */
   closeAll(): void {
-    for (const s of this.sessions.values()) {
+    for (const s of [...this.sessions.values(), ...this.draining.values()]) {
       try {
         s.transport.close();
       } catch {
@@ -846,6 +872,7 @@ class BiforestingLinkManager {
       }
     }
     this.sessions.clear();
+    this.draining.clear();
   }
 }
 

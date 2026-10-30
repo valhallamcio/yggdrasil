@@ -5,7 +5,7 @@ import { catalogEntry } from '../../domains/biforesting/ops-catalog.js';
 import { getSnapshot } from './inv-store.js';
 import { getPolicy, FEATURE_BITS } from './policy-store.js';
 import { issueUploadGrant, profileUploadUrl, UPLOAD_GRACE_MS } from './profile-store.js';
-import type { OpsStore } from './ops-store.js';
+import { SERVER_STOPPING, type OpsStore } from './ops-store.js';
 import type { SyncSnapshotDoc } from './sync-snapshot-store.js';
 import type { OpDoc, OpResMsg, PresenceMsg } from './types.js';
 
@@ -323,18 +323,24 @@ export class OpDispatcher {
   }
 
   /**
-   * `deferred`: the server behind `sessionId` stops and did not run the op. The link manager
-   * already marked that session stopping, so the redispatch here skips it. It reaches a newer
-   * session of the instance at once, else the op waits as `pending` for the next link-up. Only the
-   * dispatch that went to this session goes back; any other deferral changes nothing.
+   * `deferred` with code `server_stopping`: the server behind `sessionId` stops and did not run
+   * the op. That covers an op it acked whose task never started. The link manager already marked
+   * that session stopping, so the redispatch here skips it. It reaches a newer session of the
+   * instance at once, else the op waits as `pending` for the next link-up. Only the dispatch that
+   * went to this session goes back; any other deferral changes nothing.
    */
   private async onDeferred(op: OpDoc, msg: OpResMsg, sessionId: string | undefined): Promise<void> {
-    const code = msg.code ?? 'deferred';
+    const code = typeof msg.code === 'string' ? msg.code : null;
     const ctx = { opId: op._id, instanceKey: op.instanceKey, type: op.type, sessionId: sessionId ?? null, code };
-    if (op.state !== 'dispatched' || !sessionId || op.dispatchSessionId !== sessionId) {
+    if (code !== SERVER_STOPPING) {
+      logger.warn({ ...ctx, state: op.state }, 'biforesting-ops: deferred answer with an unknown code, ignored');
+      return;
+    }
+    const held = op.state === 'dispatched' || op.state === 'acked';
+    if (!held || !sessionId || op.dispatchSessionId !== sessionId) {
       logger.warn(
         { ...ctx, state: op.state, dispatchSessionId: op.dispatchSessionId ?? null },
-        'biforesting-ops: deferred answer for an op not dispatched to this session, ignored',
+        'biforesting-ops: deferred answer for an op this session does not hold, ignored',
       );
       return;
     }
@@ -384,7 +390,7 @@ export class OpDispatcher {
     }
 
     for (const op of await this.store.findStaleAcked(now)) {
-      const updated = await this.store.markFailed(op._id, `no result within ${op.execTimeoutMs}ms of ack`);
+      const updated = await this.store.failStaleAcked(op);
       if (updated) this.emitUpdated(updated);
     }
 

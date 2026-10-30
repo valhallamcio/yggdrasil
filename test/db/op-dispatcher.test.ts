@@ -62,7 +62,7 @@ before(async () => {
   for (const key of ['pack-a', 'pack-down', 'pack-b', 'pack-c', 'pack-evil', 'pack-f', 'pack-w', 'pack-s', 'pack-e', 'pack-t']) {
     await grantOps(key);
   }
-  for (const key of ['defer-a', 'defer-b', 'defer-c', 'defer-d', 'defer-e', 'defer-f', 'defer-g']) await grantOps(key);
+  for (const key of ['defer-a', 'defer-b', 'defer-c', 'defer-d', 'defer-e', 'defer-f', 'defer-g', 'defer-h', 'defer-i']) await grantOps(key);
 });
 after(async () => mongo.stop());
 
@@ -314,34 +314,73 @@ test('deferred: an answer from another session changes nothing', async () => {
 
   await d.onOpRes('defer-c', deferred(op._id), 'defer-c#old');
   await d.onOpRes('defer-c', deferred(op._id));
+  // The right session, but a code other than server_stopping: not a stop, so no change either.
+  await d.onOpRes('defer-c', { ...deferred(op._id), code: 'world_save' }, 'defer-c');
+  await d.onOpRes('defer-c', { opId: op._id, phase: 'result', status: 'deferred' }, 'defer-c');
   const after = await store.get(op._id);
   assert.deepEqual([after?.state, after?.dispatchSessionId, after?.attempts], ['dispatched', 'defer-c', 1]);
   assert.equal(after?.deferrals, undefined);
   assert.equal(after?.audit.length, sent?.audit.length);
 });
 
-test('deferred: an acked op and a timed-out (pending again) op stay as they are', async () => {
+test('deferred: an op acked before the stop whose task never started goes back to pending, counted as not run', async () => {
   const port = mkPort();
   const d = new OpDispatcher(store, port);
   port.live.add('defer-d');
-  const { op: acked } = await store.create(mkInput('defer-d'));
+  const { op } = await store.create(mkInput('defer-d'));
+  // One unwritable dispatch first, so the attempt count stays above 0 and provablyUnrun reads the audit.
+  port.failWrites = true;
   await d.onLinkUp('defer-d');
-  await d.onOpRes('defer-d', { opId: acked._id, phase: 'ack' });
-  await d.onOpRes('defer-d', deferred(acked._id), 'defer-d');
-  const a = await store.get(acked._id);
-  assert.deepEqual([a?.state, a?.attempts, a?.deferrals], ['acked', 1, undefined]);
+  port.failWrites = false;
+  await d.onLinkUp('defer-d');
+  await d.onOpRes('defer-d', { opId: op._id, phase: 'ack' });
 
-  // The sweep requeued a dispatch that timed out. A late deferral of that dispatch changes nothing.
-  const { op: timedOut } = await store.create(mkInput('defer-d', { dispatchTimeoutMs: 1_000 }));
+  // The mod acked, then the stop dropped the queued task and answered `deferred`.
+  port.stopping.add('defer-d');
+  await d.onOpRes('defer-d', deferred(op._id), 'defer-d');
+  const back = await store.get(op._id);
+  assert.deepEqual([back?.state, back?.attempts, back?.deferrals, back?.ackedAt], ['pending', 1, 1, null]);
+  assert.deepEqual([back?.audit.at(-1)?.from, back?.audit.at(-1)?.code], ['acked', 'server_stopping']);
+  assert.equal(provablyUnrun(back!), true, 'ack then deferral: the task never started');
+
+  port.sessions.set('defer-d', 'defer-d#2');
   await d.onLinkUp('defer-d');
-  port.live.delete('defer-d');
+  assert.deepEqual([(await store.get(op._id))?.state, port.sent.at(-1)?.sessionId], ['dispatched', 'defer-d#2']);
+});
+
+test('deferred: a timed-out (pending again) op stays as it is', async () => {
+  const port = mkPort();
+  const d = new OpDispatcher(store, port);
+  port.live.add('defer-h');
+  // The sweep requeued a dispatch that timed out. A late deferral of that dispatch changes nothing.
+  const { op } = await store.create(mkInput('defer-h', { dispatchTimeoutMs: 1_000 }));
+  await d.onLinkUp('defer-h');
+  port.live.delete('defer-h');
   await d.sweep(new Date(Date.now() + 5_000));
-  const requeued = await store.get(timedOut._id);
+  const requeued = await store.get(op._id);
   assert.equal(requeued?.state, 'pending');
-  await d.onOpRes('defer-d', deferred(timedOut._id), 'defer-d');
-  const p = await store.get(timedOut._id);
+  await d.onOpRes('defer-h', deferred(op._id), 'defer-h');
+  const p = await store.get(op._id);
   assert.deepEqual([p?.state, p?.attempts, p?.deferrals], ['pending', 1, undefined]);
   assert.equal(p?.audit.length, requeued?.audit.length);
+});
+
+test('deferred: the exec-timeout sweep acts only on the ack it read', async () => {
+  const port = mkPort();
+  const d = new OpDispatcher(store, port);
+  port.live.add('defer-i');
+  const { op } = await store.create(mkInput('defer-i', { execTimeoutMs: 1_000 }));
+  await d.onLinkUp('defer-i');
+  await d.onOpRes('defer-i', { opId: op._id, phase: 'ack' });
+  const stale = (await store.findStaleAcked(new Date(Date.now() + 5_000))).find((o) => o._id === op._id);
+  assert.ok(stale, 'the sweep read the ack as timed out');
+
+  // The deferral lands between the sweep's read and its write.
+  port.stopping.add('defer-i');
+  await d.onOpRes('defer-i', deferred(op._id), 'defer-i');
+  assert.equal(await store.failStaleAcked(stale), null, 'the stale read does not fail the requeued op');
+  const kept = await store.get(op._id);
+  assert.deepEqual([kept?.state, kept?.result], ['pending', null]);
 });
 
 test(`deferred: deferral ${MAX_DEFERRALS} fails the op with too_many_deferrals; it never ran`, async () => {

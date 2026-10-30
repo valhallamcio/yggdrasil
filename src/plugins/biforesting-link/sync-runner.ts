@@ -31,7 +31,7 @@ import type { SyncWorldDataDoc, SyncWorldDataStore } from './sync-worlddata-stor
 import { DEFERRED_NOTE, type OpsStore } from './ops-store.js';
 import type { GroupMember } from './server-resolver.js';
 import type { SyncAt, SyncDirectory, SyncLinkPort, SyncLiveHooks } from './sync-service.js';
-import type { OpDoc, OpTarget, PresencePlayer, SyncBlockedEntry, SyncStamp } from './types.js';
+import type { OpAuditEntry, OpDoc, OpTarget, PresencePlayer, SyncBlockedEntry, SyncStamp } from './types.js';
 
 /**
  * Player sync S2 and S3 on the Yggdrasil side (bifrost-lib `docs/invariants/player-sync.md`
@@ -157,18 +157,21 @@ export type OpClass =
 /**
  * True when no dispatch of this op can have reached the mod. A dispatch whose link write failed
  * (the eager requeue right after it) never left Yggdrasil. A dispatch the mod answered `deferred`
- * (its server stops) did not run. A `waiting_player` answer means the mod ran nothing.
+ * (its server stops) did not run, also when the mod acked it first: it defers an acked op only
+ * when its task never started. A `waiting_player` answer means the mod ran nothing.
  */
 export function provablyUnrun(op: Pick<OpDoc, 'attempts' | 'audit'>): boolean {
   if (op.attempts === 0) return true;
   const audit = op.audit ?? [];
+  const isDeferral = (e: OpAuditEntry | undefined): boolean =>
+    (e?.from === 'dispatched' || e?.from === 'acked') && e.note?.startsWith(DEFERRED_NOTE) === true;
   let mayHaveRun = false;
   for (let i = 0; i < audit.length; i++) {
     const entry = audit[i]!;
     if (entry.to === 'dispatched') {
       const next = audit[i + 1];
       const neverSent = next?.to === 'pending' && next.note?.startsWith('link not writable') === true;
-      const deferred = next?.from === 'dispatched' && next.note?.startsWith(DEFERRED_NOTE) === true;
+      const deferred = isDeferral(next) || (next?.to === 'acked' && isDeferral(audit[i + 2]));
       if (!neverSent && !deferred) mayHaveRun = true;
     } else if (entry.to === 'waiting_player') {
       mayHaveRun = false;

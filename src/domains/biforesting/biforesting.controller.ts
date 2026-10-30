@@ -14,7 +14,7 @@ import { serverResolver } from '../../plugins/biforesting-link/server-resolver.j
 import { NotFoundError, ValidationError } from '../../shared/errors/index.js';
 import { catalogEntry, dryRunConfirmError, OPS_CATALOG } from './ops-catalog.js';
 import { settlePreApplySnapshot } from './settle-snapshot.js';
-import { assertFeatureGranted, assertProfileBudget } from './profiles.controller.js';
+import { assertFeatureGranted, assertOneInstance, assertProfileBudget } from './profiles.controller.js';
 import { PROFILE_FETCH_EXEC_TIMEOUT_MS, profileCaptureExecTimeoutMs } from './profile-budget.js';
 import type { LinkServerParams, PolicyPutBody, QuestDownBody, ChunksDownBody, OpCreateBody, OpIdParams, OpListQuery, MetricsHistoryQuery, PlayerInvParams, SnapshotIdParams, QuestSearchQuery, ItemSearchQuery, PackParams, PackIconParams, PackLangBody, IconsUploadBody } from './biforesting.schema.js';
 
@@ -47,6 +47,7 @@ export class BiforestingController {
     if (!identity.resolved) {
       throw new ValidationError(`Unknown server '${server}'`);
     }
+    assertOneInstance(identity, server);
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(player);
     const target = isUuid ? { uuid: player } : { name: player };
 
@@ -365,6 +366,7 @@ export class BiforestingController {
     if (!identity.resolved) {
       throw new ValidationError(`Unknown server '${server}' — ops must target a resolvable server`);
     }
+    assertOneInstance(identity, server);
 
     // Dangerous-op guard: creating a requiresConfirm type demands an explicit flags.confirm —
     // the server-side half of the Discord confirmation flow. A raw REST caller with an API key
