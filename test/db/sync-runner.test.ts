@@ -8,7 +8,7 @@ import { startTestMongo, type TestMongo } from '../helpers/mongo.ts';
 import { eventBus } from '../../src/core/event-bus/index.ts';
 import type { AppEventPayload } from '../../src/core/event-bus/events.ts';
 import { Reader } from '../../src/plugins/biforesting-link/frame-codec.ts';
-import { OpsStore } from '../../src/plugins/biforesting-link/ops-store.ts';
+import { MAX_DEFERRALS, OpsStore } from '../../src/plugins/biforesting-link/ops-store.ts';
 import { OpDispatcher } from '../../src/plugins/biforesting-link/op-dispatcher.ts';
 import { setPolicy, setPolicyDbProvider, maskForFeatures } from '../../src/plugins/biforesting-link/policy-store.ts';
 import { SyncGroupsStore } from '../../src/plugins/biforesting-link/sync-groups-store.ts';
@@ -121,7 +121,7 @@ before(async () => {
       sent.push({ instanceKey, ...decodeOp(payload) });
       return true;
     },
-    sessionFor: (instanceKey) => (liveKeys.has(instanceKey) ? instanceKey : null),
+    sessionFor: (instanceKey) => (liveKeys.has(instanceKey) ? { sessionId: instanceKey, bootNonce: instanceKey } : null),
     liveInstanceKeys: () => [...liveKeys],
   });
   groups = new SyncGroupsStore(() => db, now);
@@ -1265,6 +1265,27 @@ test('final ops: a sync_commit that the mod answers "player sync is inert" waits
   await answer(again, 'completed', { removed: [] });
   const done = await moveOf(id);
   assert.deepEqual([done.step, done.error, done.uncounted.commit], ['done', null, 1]);
+});
+
+test('final ops: a sync_commit that a crash loop deferred too often counts no attempt and goes out again', async () => {
+  const u = newUuid();
+  await seed(u, A, 0);
+  const { id } = await toApply(u);
+  await answer(await lastOp(u, 'sync_apply'), 'completed', { applied: true, v: 1 });
+  const commit = await lastOp(u, 'sync_commit');
+  // Each JVM of the loop gets the op and stops at once. The fake link sends it again to the same session.
+  for (let i = 0; i < MAX_DEFERRALS; i++) {
+    await dispatcher.onOpRes(commit.instanceKey, { opId: commit._id, phase: 'result', status: 'deferred', code: 'server_stopping' }, { sessionId: commit.instanceKey, bootNonce: commit.instanceKey });
+  }
+  assert.equal((await store.get(commit._id))?.result?.code, 'too_many_deferrals');
+  await current.idle();
+  await current.sweep();
+  await current.idle();
+  const again = await lastOp(u, 'sync_commit');
+  assert.equal(again.idempotencyKey, `sync:evol:${u}:${id}:commit:1`);
+  await answer(again, 'completed', { removed: [] });
+  const done = await moveOf(id);
+  assert.deepEqual([done.step, done.attempts.commit, done.uncounted.commit], ['done', 2, 1]);
 });
 
 // ── Force-release ────────────────────────────────────────────────────────────

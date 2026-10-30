@@ -10,7 +10,7 @@ import { saveQuests, saveChunks } from './persistence.js';
 import { saveItemRegistry } from './item-registry-store.js';
 import { decodeSpike } from './profile-spike.js';
 import { storeSpikeReport } from './profile-store.js';
-import { getPolicy, inheritedKey, resolvePolicy, ZERO_POLICY } from './policy-store.js';
+import { FEATURE_BITS, getPolicy, inheritedKey, resolvePolicy, ZERO_POLICY } from './policy-store.js';
 import { serverResolver } from './server-resolver.js';
 import { SERVER_STOPPING } from './ops-store.js';
 import {
@@ -29,7 +29,7 @@ import {
   type LiveStats,
   type LiveUpMsg,
 } from './live.js';
-import type { DecodedSyncSnap, LinkIdentity, LinkMetrics, LinkSnapshot, LinkSessionSnapshot, OpResMsg, PresenceMsg, RegisterInfo, RegisterSync } from './types.js';
+import type { DecodedSyncSnap, LinkIdentity, LinkMetrics, LinkSnapshot, LinkSessionSnapshot, OpResMsg, OpSession, PresenceMsg, RegisterInfo, RegisterSync } from './types.js';
 
 const HELLO = 'biforesting:hello';
 const REGISTER = 'biforesting:register';
@@ -44,6 +44,7 @@ const INVSNAP = 'biforesting:invsnap';
 const QUESTREG = 'biforesting:questreg';
 const SPIKE = 'biforesting:spike';
 const SYNCSNAP = 'biforesting:syncsnap';
+const OPS_BIT = FEATURE_BITS['ops']!;
 
 /**
  * Where op_res/presence messages and link-up notifications go (the op dispatcher). Wired by the
@@ -51,8 +52,8 @@ const SYNCSNAP = 'biforesting:syncsnap';
  * import cycle with the ops runtime.
  */
 export interface OpSink {
-  /** `sessionId` is the link session the answer came on. */
-  onOpRes(instanceKey: string, msg: OpResMsg, sessionId?: string): Promise<void>;
+  /** `from` is the link session the answer came on. */
+  onOpRes(instanceKey: string, msg: OpResMsg, from?: OpSession): Promise<void>;
   onPresence(instanceKey: string, msg: PresenceMsg): Promise<void>;
   onLinkUp(instanceKey: string): Promise<void>;
 }
@@ -161,10 +162,10 @@ class BiforestingLinkManager {
     return keys;
   }
 
-  /** The id of the session that takes ops for exactly this instanceKey, or null. A tag never matches. */
-  opSessionFor(instanceKey: string): string | null {
+  /** The session that takes ops for exactly this instanceKey, or null. A tag never matches. */
+  opSessionFor(instanceKey: string): OpSession | null {
     for (const s of this.sessions.values()) {
-      if (this.takesOps(s) && s.identity.instanceKey === instanceKey) return s.sessionId;
+      if (this.takesOps(s) && s.identity.instanceKey === instanceKey) return this.opSessionOf(s);
     }
     return null;
   }
@@ -176,8 +177,17 @@ class BiforestingLinkManager {
     return this.sendDownToSession(s, channel, payload);
   }
 
+  /**
+   * A session takes ops once its reg_ack granted the ops bit, and until it stops. Before the
+   * reg_ack the mod refuses every op ("ops disabled"). `sendRegAck` sets `granted` in the same
+   * step as the reg_ack write.
+   */
   private takesOps(s: Session): s is Session & { identity: LinkIdentity } {
-    return !!s.identity?.resolved && !s.stopping && s.transport.writable();
+    return !!s.identity?.resolved && (s.granted & OPS_BIT) !== 0 && !s.stopping && s.transport.writable();
+  }
+
+  private opSessionOf(s: Session): OpSession {
+    return { sessionId: s.sessionId, bootNonce: s.register?.bootNonce ?? null };
   }
 
   /** The server answered `deferred`, so it stops. Ops skip the session from now on. */
@@ -337,7 +347,7 @@ class BiforestingLinkManager {
         if (s.identity?.resolved && this.opSink) {
           const msg = decodeOpRes(payload);
           if (msg.phase === 'result' && msg.status === 'deferred' && msg.code === SERVER_STOPPING) this.markStopping(s, msg);
-          await this.opSink.onOpRes(s.identity.instanceKey, msg, s.sessionId);
+          await this.opSink.onOpRes(s.identity.instanceKey, msg, this.opSessionOf(s));
         }
         break;
       case PRESENCE:
@@ -781,13 +791,12 @@ class BiforestingLinkManager {
 
   /**
    * The live session of one Pterodactyl serverId. Exact match only: a tag or an instanceKey can
-   * name another instance of the same group. A stopping session is not live.
+   * name another instance of the same group. Live means it takes ops, the same rule as op dispatch.
    */
   liveInstance(serverId: string): { instanceKey: string; capabilities: number; sync: RegisterSync | null } | null {
     for (const s of this.sessions.values()) {
-      const id = s.identity;
-      if (id?.resolved && id.serverId === serverId && !s.stopping && s.transport.writable()) {
-        return { instanceKey: id.instanceKey, capabilities: s.register?.capabilities ?? 0, sync: s.register?.sync ?? null };
+      if (this.takesOps(s) && s.identity.serverId === serverId) {
+        return { instanceKey: s.identity.instanceKey, capabilities: s.register?.capabilities ?? 0, sync: s.register?.sync ?? null };
       }
     }
     return null;

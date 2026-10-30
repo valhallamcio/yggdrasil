@@ -28,7 +28,7 @@ import {
 } from './sync-moves-store.js';
 import type { SyncGroupDoc, SyncGroupsStore } from './sync-groups-store.js';
 import type { SyncWorldDataDoc, SyncWorldDataStore } from './sync-worlddata-store.js';
-import { DEFERRED_NOTE, type OpsStore } from './ops-store.js';
+import { DEFERRED_NOTE, TOO_MANY_DEFERRALS, type OpsStore } from './ops-store.js';
 import type { GroupMember } from './server-resolver.js';
 import type { SyncAt, SyncDirectory, SyncLinkPort, SyncLiveHooks } from './sync-service.js';
 import type { OpAuditEntry, OpDoc, OpTarget, PresencePlayer, SyncBlockedEntry, SyncStamp } from './types.js';
@@ -206,13 +206,15 @@ export type NoVerdict = 'feature_off' | 'no_link' | 'inert';
 /**
  * Why an op ended without a verdict from the mod, or null when the mod answered it. `feature_off`:
  * the dispatcher failed it, the player_sync bit is off. `inert`: the mod's sync config is invalid.
- * `no_link`: it expired, or failed with no ack and no code. For the final ops (abort, commit,
- * re-apply, disown) such a failure does not count against the retry limit.
+ * `no_link`: it expired, failed with no ack and no code, or was deferred too often (each JVM it
+ * reached stopped first, as in a crash loop). For the final ops (abort, commit, re-apply, disown)
+ * such a failure does not count against the retry limit.
  */
 export function noVerdict(op: OpDoc): NoVerdict | null {
   if (op.state === 'expired') return 'no_link';
   if (op.state !== 'failed') return null;
   const code = op.result?.code;
+  if (code === TOO_MANY_DEFERRALS) return 'no_link';
   if (code === 'feature_off') return 'feature_off';
   if (code === 'inert') return 'inert';
   if (code === 'not_applied' && INERT_ERROR.test(op.result?.error ?? '')) return 'inert';

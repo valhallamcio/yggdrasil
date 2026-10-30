@@ -165,7 +165,7 @@ test('deferred over the link: a closed stopping session leaves no flag; the next
   const b = transport();
   lm.registerSession('arc#4', b.t, '10.0.0.3:4');
   await lm.dispatch('arc#4', 'biforesting:register', register('a0000001', 4n));
-  assert.equal(lm.opSessionFor('arc'), 'arc#4');
+  assert.equal(lm.opSessionFor('arc')?.sessionId, 'arc#4');
   assert.equal(opSends(b), 1);
   assert.equal((await ops.opsStore.get(id))?.dispatchSessionId, 'arc#4');
   lm.removeSession('arc#4');
@@ -218,7 +218,7 @@ test('deferred over the link: a code other than server_stopping marks no session
   await lm.dispatch('arc#5', 'biforesting:op_res', opRes({ opId: id, phase: 'result', status: 'deferred', code: 'world_save' }));
   await lm.dispatch('arc#5', 'biforesting:op_res', opRes({ opId: id, phase: 'result', status: 'deferred', code: 7 }));
   assert.equal(stoppingOf('arc#5'), false);
-  assert.equal(lm.opSessionFor('arc'), 'arc#5');
+  assert.equal(lm.opSessionFor('arc')?.sessionId, 'arc#5');
   const op = await ops.opsStore.get(id);
   assert.deepEqual([op?.state, op?.dispatchSessionId, op?.deferrals], ['dispatched', 'arc#5', undefined]);
   lm.removeSession('arc#5');
@@ -257,8 +257,73 @@ test('deferred over the link: the old JVM still answers after the next JVM regis
   assert.equal(lm.getSnapshot().sessions.find((s) => s.sessionId === 'arc#7')?.framesAccepted, before);
 
   lm.removeSession('arc#6');
-  assert.equal(lm.opSessionFor('arc'), 'arc#7', 'the old session closing leaves the new one alone');
+  assert.equal(lm.opSessionFor('arc')?.sessionId, 'arc#7', 'the old session closing leaves the new one alone');
   lm.removeSession('arc#7');
+});
+
+test('a session takes ops only after its reg_ack granted them: a hello alone gets none', async () => {
+  const id = await createOp('arc');
+  const a = transport();
+  lm.registerSession('arc#8', a.t, '10.0.0.3:8');
+  await lm.dispatch('arc#8', 'biforesting:hello', Buffer.from('a0000001', 'utf8'));
+  assert.equal(lm.opSessionFor('arc'), null, 'the identity is known, but the mod has no grant yet');
+  assert.equal(lm.liveInstance('a0000001'), null, 'player sync agrees with op dispatch');
+  await ops.opDispatcher.sweep();
+  assert.deepEqual([(await ops.opsStore.get(id))?.state, opSends(a)], ['pending', 0]);
+
+  await lm.dispatch('arc#8', 'biforesting:register', register('a0000001', 8n));
+  const ackAt = a.state.channels.indexOf('biforesting:reg_ack');
+  assert.ok(ackAt >= 0 && ackAt < a.state.channels.indexOf('biforesting:op'), 'the reg_ack goes out before the first op');
+  assert.equal((await ops.opsStore.get(id))?.dispatchSessionId, 'arc#8');
+  lm.removeSession('arc#8');
+});
+
+test('deferred over the link: the same JVM answers on a new connection; its deferral counts', async () => {
+  const a = transport();
+  lm.registerSession('arc#9', a.t, '10.0.0.3:9');
+  await lm.dispatch('arc#9', 'biforesting:register', register('a0000001', 9n));
+  const id = await createOp('arc');
+  await lm.dispatch('arc#9', 'biforesting:op_res', opRes({ opId: id, phase: 'ack' }));
+
+  // The connection drops before the stop. The same JVM links again with its boot nonce.
+  a.t.close();
+  lm.removeSession('arc#9');
+  const again = transport();
+  lm.registerSession('arc#10', again.t, '10.0.0.3:10');
+  await lm.dispatch('arc#10', 'biforesting:register', register('a0000001', 9n));
+  assert.equal(opSends(again), 0, 'the acked op is not sent again');
+
+  // The stop drops the acked op from the queue and answers it `deferred` on the new connection.
+  await defer('arc#10', id);
+  assert.equal(stoppingOf('arc#10'), true);
+  const back = await ops.opsStore.get(id);
+  assert.deepEqual([back?.state, back?.attempts, back?.deferrals, back?.ackedAt], ['pending', 0, 1, null]);
+
+  const b = transport();
+  lm.registerSession('arc#11', b.t, '10.0.0.3:11');
+  await lm.dispatch('arc#11', 'biforesting:register', register('a0000001', 11n));
+  const moved = await ops.opsStore.get(id);
+  assert.deepEqual([moved?.state, moved?.dispatchSessionId], ['dispatched', 'arc#11'], 'the next JVM gets it at its link-up');
+  lm.removeSession('arc#10');
+  lm.removeSession('arc#11');
+});
+
+test('GET inventory: a stopping session is not live; the stored snapshot answers at once and no op waits', async () => {
+  const { BiforestingController } = await import('../../src/domains/biforesting/biforesting.controller.ts');
+  const { NotFoundError } = await import('../../src/shared/errors/index.ts');
+  const a = transport();
+  lm.registerSession('arc#12', a.t, '10.0.0.3:12');
+  await lm.dispatch('arc#12', 'biforesting:register', register('a0000001', 12n));
+  await defer('arc#12', await createOp('arc'));
+  assert.equal(stoppingOf('arc#12'), true);
+
+  const inspects = async (): Promise<number> => (await ops.opsStore.list({ instanceKey: 'arc', type: 'inspect_inventory' }, 500)).length;
+  const inspectsBefore = await inspects();
+  const started = Date.now();
+  await assert.rejects(new BiforestingController().getPlayerInventory(request({ server: 'arc', player: 'Steve' }, {}), response()), NotFoundError);
+  assert.ok(Date.now() - started < 4_000, 'no wait for a live answer');
+  assert.equal(await inspects(), inspectsBefore, 'no inspect op waits for the next JVM');
+  lm.removeSession('arc#12');
 });
 
 test('POST /ops: a tag of several instances is refused; a one-instance tag and a serverId resolve', async () => {

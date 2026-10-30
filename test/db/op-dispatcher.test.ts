@@ -8,7 +8,7 @@ import { OpDispatcher, OP_CHANNEL } from '../../src/plugins/biforesting-link/op-
 import { decodeJsonPayload } from '../../src/plugins/biforesting-link/decoders.ts';
 import { setPolicy, setPolicyDbProvider, maskForFeatures } from '../../src/plugins/biforesting-link/policy-store.ts';
 import { classifyOp, provablyUnrun } from '../../src/plugins/biforesting-link/sync-runner.ts';
-import type { OpResMsg } from '../../src/plugins/biforesting-link/types.ts';
+import type { OpResMsg, OpSession } from '../../src/plugins/biforesting-link/types.ts';
 
 let mongo: TestMongo;
 let store: OpsStore;
@@ -22,23 +22,29 @@ async function grantOps(instanceKey: string): Promise<void> {
 /**
  * Capturing fake of the link manager: records DOWN sends, per-instance liveness switch. The
  * session id of a live instance is the instanceKey until a test names a new one in `sessions`
- * (the next JVM). A session in `stopping` takes no op. `failWrites` drops every write.
+ * (the next JVM). The bootNonce of a session is `boot:<sessionId>` unless `nonces` names the JVM
+ * (a later connection of the same JVM). A session in `stopping` takes no op. `failWrites` drops
+ * every write.
  */
 function mkPort() {
   const sent: Array<{ instanceKey: string; sessionId: string; channel: string; body: Record<string, unknown> }> = [];
   const live = new Set<string>();
   const sessions = new Map<string, string>();
   const stopping = new Set<string>();
+  const nonces = new Map<string, string>();
   const sessionOf = (instanceKey: string): string => sessions.get(instanceKey) ?? instanceKey;
+  const session = (sessionId: string): OpSession => ({ sessionId, bootNonce: nonces.get(sessionId) ?? `boot:${sessionId}` });
   const port = {
     sent,
     live,
     sessions,
     stopping,
+    nonces,
+    session,
     failWrites: false,
-    sessionFor: (instanceKey: string) => {
+    sessionFor: (instanceKey: string): OpSession | null => {
       const sessionId = sessionOf(instanceKey);
-      return live.has(instanceKey) && !stopping.has(sessionId) ? sessionId : null;
+      return live.has(instanceKey) && !stopping.has(sessionId) ? session(sessionId) : null;
     },
     sendDown: (sessionId: string, channel: string, payload: Buffer) => {
       const instanceKey = [...live].find((k) => sessionOf(k) === sessionId);
@@ -263,7 +269,7 @@ test('deferred: the session the op went to answers; back to pending, no attempt,
 
   // The link manager marks the session stopping before it routes the answer.
   port.stopping.add('defer-a');
-  await d.onOpRes('defer-a', deferred(op._id), 'defer-a');
+  await d.onOpRes('defer-a', deferred(op._id), port.session('defer-a'));
   const back = await store.get(op._id);
   assert.equal(back?.state, 'pending');
   assert.equal(back?.attempts, 0, 'a deferral is no attempt');
@@ -298,29 +304,38 @@ test('deferred: a late answer from the old session sends the op to the newer ses
   assert.equal(port.sent.length, 1);
 
   port.stopping.add('defer-b');
-  await d.onOpRes('defer-b', deferred(op._id), 'defer-b');
+  await d.onOpRes('defer-b', deferred(op._id), port.session('defer-b'));
   const moved = await store.get(op._id);
   assert.deepEqual([moved?.state, moved?.dispatchSessionId, moved?.attempts, moved?.deferrals], ['dispatched', 'defer-b#2', 1, 1]);
   assert.equal(port.sent.at(-1)?.sessionId, 'defer-b#2');
 });
 
-test('deferred: an answer from another session changes nothing', async () => {
+test('deferred: an answer from another JVM changes nothing; the same JVM on a later connection counts', async () => {
   const port = mkPort();
   const d = new OpDispatcher(store, port);
   port.live.add('defer-c');
   const { op } = await store.create(mkInput('defer-c'));
   await d.onLinkUp('defer-c');
   const sent = await store.get(op._id);
+  assert.deepEqual([sent?.dispatchSessionId, sent?.dispatchBootNonce], ['defer-c', 'boot:defer-c']);
 
-  await d.onOpRes('defer-c', deferred(op._id), 'defer-c#old');
+  await d.onOpRes('defer-c', deferred(op._id), port.session('defer-c#old'));
   await d.onOpRes('defer-c', deferred(op._id));
+  await d.onOpRes('defer-c', deferred(op._id), { sessionId: 'defer-c', bootNonce: null });
   // The right session, but a code other than server_stopping: not a stop, so no change either.
-  await d.onOpRes('defer-c', { ...deferred(op._id), code: 'world_save' }, 'defer-c');
-  await d.onOpRes('defer-c', { opId: op._id, phase: 'result', status: 'deferred' }, 'defer-c');
+  await d.onOpRes('defer-c', { ...deferred(op._id), code: 'world_save' }, port.session('defer-c'));
+  await d.onOpRes('defer-c', { opId: op._id, phase: 'result', status: 'deferred' }, port.session('defer-c'));
   const after = await store.get(op._id);
   assert.deepEqual([after?.state, after?.dispatchSessionId, after?.attempts], ['dispatched', 'defer-c', 1]);
   assert.equal(after?.deferrals, undefined);
   assert.equal(after?.audit.length, sent?.audit.length);
+
+  // The connection dropped, and the same JVM answers on its next one.
+  port.live.delete('defer-c');
+  port.nonces.set('defer-c#2', 'boot:defer-c');
+  await d.onOpRes('defer-c', deferred(op._id), port.session('defer-c#2'));
+  const back = await store.get(op._id);
+  assert.deepEqual([back?.state, back?.attempts, back?.deferrals], ['pending', 0, 1]);
 });
 
 test('deferred: an op acked before the stop whose task never started goes back to pending, counted as not run', async () => {
@@ -337,7 +352,7 @@ test('deferred: an op acked before the stop whose task never started goes back t
 
   // The mod acked, then the stop dropped the queued task and answered `deferred`.
   port.stopping.add('defer-d');
-  await d.onOpRes('defer-d', deferred(op._id), 'defer-d');
+  await d.onOpRes('defer-d', deferred(op._id), port.session('defer-d'));
   const back = await store.get(op._id);
   assert.deepEqual([back?.state, back?.attempts, back?.deferrals, back?.ackedAt], ['pending', 1, 1, null]);
   assert.deepEqual([back?.audit.at(-1)?.from, back?.audit.at(-1)?.code], ['acked', 'server_stopping']);
@@ -359,7 +374,7 @@ test('deferred: a timed-out (pending again) op stays as it is', async () => {
   await d.sweep(new Date(Date.now() + 5_000));
   const requeued = await store.get(op._id);
   assert.equal(requeued?.state, 'pending');
-  await d.onOpRes('defer-h', deferred(op._id), 'defer-h');
+  await d.onOpRes('defer-h', deferred(op._id), port.session('defer-h'));
   const p = await store.get(op._id);
   assert.deepEqual([p?.state, p?.attempts, p?.deferrals], ['pending', 1, undefined]);
   assert.equal(p?.audit.length, requeued?.audit.length);
@@ -377,7 +392,7 @@ test('deferred: the exec-timeout sweep acts only on the ack it read', async () =
 
   // The deferral lands between the sweep's read and its write.
   port.stopping.add('defer-i');
-  await d.onOpRes('defer-i', deferred(op._id), 'defer-i');
+  await d.onOpRes('defer-i', deferred(op._id), port.session('defer-i'));
   assert.equal(await store.failStaleAcked(stale), null, 'the stale read does not fail the requeued op');
   const kept = await store.get(op._id);
   assert.deepEqual([kept?.state, kept?.result], ['pending', null]);
@@ -394,7 +409,7 @@ test(`deferred: deferral ${MAX_DEFERRALS} fails the op with too_many_deferrals; 
     await d.onLinkUp('defer-e');
     assert.equal((await store.get(op._id))?.dispatchSessionId, sessionId);
     port.stopping.add(sessionId);
-    await d.onOpRes('defer-e', deferred(op._id), sessionId);
+    await d.onOpRes('defer-e', deferred(op._id), port.session(sessionId));
     if (i < MAX_DEFERRALS) assert.equal((await store.get(op._id))?.state, 'pending', `deferral ${i} requeues`);
   }
   const failed = await store.get(op._id);
@@ -417,7 +432,7 @@ test('deferred: the sweep acts only on the dispatch it read', async () => {
 
   // The deferral lands between the sweep's read and its write. Before, the stale read failed the op.
   port.stopping.add('defer-f');
-  await d.onOpRes('defer-f', deferred(op._id), 'defer-f');
+  await d.onOpRes('defer-f', deferred(op._id), port.session('defer-f'));
   assert.equal(await store.requeueOrFail(stale), null, 'the stale read neither fails nor requeues');
   const kept = await store.get(op._id);
   assert.deepEqual([kept?.state, kept?.result], ['pending', null]);
@@ -441,7 +456,7 @@ test('deferred: provablyUnrun counts a deferred dispatch as not run', async () =
   port.failWrites = false;
   await d.onLinkUp('defer-g');
   port.stopping.add('defer-g');
-  await d.onOpRes('defer-g', deferred(op._id), 'defer-g');
+  await d.onOpRes('defer-g', deferred(op._id), port.session('defer-g'));
   const once = await store.get(op._id);
   assert.equal(once?.attempts, 1, 'the unwritable dispatch keeps its attempt');
   assert.equal(provablyUnrun(once!), true);

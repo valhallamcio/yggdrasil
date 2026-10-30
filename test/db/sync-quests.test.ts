@@ -113,7 +113,7 @@ before(async () => {
       sent.push({ instanceKey, ...decodeOp(payload) });
       return true;
     },
-    sessionFor: (instanceKey) => (liveKeys.has(instanceKey) ? instanceKey : null),
+    sessionFor: (instanceKey) => (liveKeys.has(instanceKey) ? { sessionId: instanceKey, bootNonce: instanceKey } : null),
     liveInstanceKeys: () => [...liveKeys],
   });
   groups = new SyncGroupsStore(() => db);
@@ -406,6 +406,28 @@ test('action: no result in time: 409 timeout; a dispatched op is cancelled, an a
   await assert.rejects(q, rejectsWith('timeout'));
   assert.equal((await opDoc(t.opId)).state, 'acked', 'an acked op cannot be cancelled');
   assert.match((await ledger.get('qg', v))?.lease?.holder ?? '', /^quests:/);
+});
+
+test('action: an op the stopping owner deferred is cancelled at the deadline; it never ran, so the lock goes', async () => {
+  const u = newUuid();
+  await seed(u, Q1);
+  const p = quick.action('qg', u, { action: 'fresh' }, 'test');
+  const s = await nextSent('quests_action', Q1);
+  // The owner stops and defers the op. No next JVM links before the deadline.
+  liveKeys.delete(s.instanceKey);
+  try {
+    await dispatcher.onOpRes(s.instanceKey, { opId: s.opId, phase: 'result', status: 'deferred', code: 'server_stopping' }, { sessionId: s.instanceKey, bootNonce: s.instanceKey });
+    assert.equal((await opDoc(s.opId)).state, 'pending');
+    await assert.rejects(p, (err: unknown) => {
+      assert.ok(err instanceof QuestOpError);
+      assert.deepEqual([err.code, err.unsettled], ['timeout', false]);
+      return true;
+    });
+  } finally {
+    liveKeys.add(s.instanceKey);
+  }
+  assert.equal((await opDoc(s.opId)).state, 'cancelled');
+  assert.equal((await ledger.get('qg', u))?.lease, null, 'the lock is gone');
 });
 
 test('action: a parked op (waiting_player) is cancelled: 409 player_offline', async () => {

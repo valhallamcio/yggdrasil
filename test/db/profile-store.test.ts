@@ -53,7 +53,7 @@ function mkPort(linkIds: Record<string, string> = {}) {
       sent.push({ instanceKey, body: decodeJsonPayload(payload) as Record<string, unknown> });
       return true;
     },
-    sessionFor: (instanceKey: string) => (live.has(instanceKey) ? instanceKey : null),
+    sessionFor: (instanceKey: string) => (live.has(instanceKey) ? { sessionId: instanceKey, bootNonce: instanceKey } : null),
     liveInstanceKeys: () => [...live],
     linkServerIdFor: (instanceKey: string) => linkIds[instanceKey] ?? null,
   };

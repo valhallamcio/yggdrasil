@@ -4,7 +4,7 @@ import { biforestingLinkManager } from './link-manager.js';
 import { CompoundOps } from './compound-ops.js';
 import { OpDispatcher } from './op-dispatcher.js';
 import { OpsStore } from './ops-store.js';
-import type { OpDoc } from './types.js';
+import type { OpDoc, OpSession } from './types.js';
 
 /**
  * Production singletons for the durable ops layer. The store resolves the Db lazily per call
@@ -15,7 +15,7 @@ import type { OpDoc } from './types.js';
 export const opsStore = new OpsStore(() => getDb());
 
 export const opDispatcher = new OpDispatcher(opsStore, {
-  sessionFor: (instanceKey): string | null => biforestingLinkManager.opSessionFor(instanceKey),
+  sessionFor: (instanceKey): OpSession | null => biforestingLinkManager.opSessionFor(instanceKey),
   sendDown: (sessionId, channel, payload): boolean => biforestingLinkManager.sendOpDown(sessionId, channel, payload),
   liveInstanceKeys: () => biforestingLinkManager.liveInstanceKeys(),
   linkServerIdFor: (instanceKey): string | null => biforestingLinkManager.getSessionByServer(instanceKey)?.identity?.linkServerId ?? null,

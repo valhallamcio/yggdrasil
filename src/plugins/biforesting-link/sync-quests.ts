@@ -6,7 +6,7 @@ import { FEATURE_BITS } from './policy-store.js';
 import { ulid } from './ulid.js';
 import { QUEST_LOCK_PREFIX, questLockHeld, type SyncLedgerStore, type SyncPlayerDoc } from './sync-ledger-store.js';
 import { questMergeId, type QuestMergeStart, type SyncQuestMergeDoc, type SyncQuestMergesStore } from './sync-quest-merges-store.js';
-import { instanceLabel, SYNC_MESSAGES, SyncConflictError, type SyncRunnerDirectory } from './sync-runner.js';
+import { instanceLabel, provablyUnrun, SYNC_MESSAGES, SyncConflictError, type SyncRunnerDirectory } from './sync-runner.js';
 import type { SyncGroupsStore } from './sync-groups-store.js';
 import type { SyncSnapshotStore } from './sync-snapshot-store.js';
 import type { SyncInstanceLink, SyncLinkPort } from './sync-service.js';
@@ -586,8 +586,10 @@ export class SyncQuests {
       const cancelled = await this.deps.ops.cancel(end._id, 'sync-quests');
       throw new QuestOpError(409, 'player_offline', QUEST_MESSAGES.playerOffline, cancelled === null, details);
     }
-    if (!ENDED.has(end.state)) await this.deps.ops.cancel(end._id, 'sync-quests (no result in time)');
-    throw timeout(end.dispatchedAt !== null || end.ackedAt !== null, details);
+    // A cancelled op never goes out again. It may still run only if a dispatch reached a JVM that
+    // did not defer it. A failed cancel means the op went on (acked) since the read.
+    const closed = ENDED.has(end.state) ? end : await this.deps.ops.cancel(end._id, 'sync-quests (no result in time)');
+    throw timeout(closed === null || !provablyUnrun(closed), details);
   }
 
   /** Dispatches `op` and waits until it reaches an end state or the `deadline` passes. */

@@ -1,7 +1,7 @@
 import type { Collection, Db, Filter } from 'mongodb';
 import { logger } from '../../core/logger/index.js';
 import { ulid } from './ulid.js';
-import type { OpDoc, OpFlags, OpResult, OpState, OpTarget } from './types.js';
+import type { OpDoc, OpFlags, OpResult, OpSession, OpState, OpTarget } from './types.js';
 
 /**
  * Durable op store over `biforesting_ops` — the keystone of the v2 job API. Yggdrasil owns the
@@ -61,6 +61,12 @@ export const DEFERRED_NOTE = 'deferred by the server';
 /** The code of a `deferred` answer from a server that stops. Only this code defers an op. */
 export const SERVER_STOPPING = 'server_stopping';
 
+/** The result code of an op failed at its {@link MAX_DEFERRALS}th deferral. The mod never ran it. */
+export const TOO_MANY_DEFERRALS = 'too_many_deferrals';
+
+/** Every state an op can fail from. */
+const FAILABLE_STATES: OpState[] = ['pending', 'dispatched', 'acked', 'waiting_player'];
+
 /** Extra parts of one guarded transition. */
 interface TransitionOpts {
   /** CAS conditions on top of `_id` and `state`. */
@@ -68,6 +74,14 @@ interface TransitionOpts {
   inc?: Partial<Record<'attempts' | 'deferrals', number>>;
   /** The mod's answer code, kept on the audit entry. */
   code?: string;
+}
+
+/** Extra parts of a failure write. */
+interface FailOpts extends TransitionOpts {
+  /** The states the op may fail from. Default: {@link FAILABLE_STATES}. */
+  from?: OpState | OpState[];
+  /** More fields to set with the failure. */
+  set?: Partial<OpDoc>;
 }
 
 export class OpsStore {
@@ -191,15 +205,21 @@ export class OpsStore {
   }
 
   /**
-   * pending → dispatched (attempts+1), written to link session `sessionId`. Null when the op is
+   * pending → dispatched (attempts+1), written to link session `session`. Null when the op is
    * no longer pending (racing sweep/cancel).
    */
-  async markDispatched(opId: string, sessionId: string | null = null): Promise<OpDoc | null> {
+  async markDispatched(opId: string, session: OpSession | null = null): Promise<OpDoc | null> {
     const now = new Date();
     const res = await this.col().findOneAndUpdate(
       { _id: opId, state: 'pending' },
       {
-        $set: { state: 'dispatched', dispatchedAt: now, dispatchSessionId: sessionId, updatedAt: now },
+        $set: {
+          state: 'dispatched',
+          dispatchedAt: now,
+          dispatchSessionId: session?.sessionId ?? null,
+          dispatchBootNonce: session?.bootNonce ?? null,
+          updatedAt: now,
+        },
         $inc: { attempts: 1 },
         $push: { audit: { at: now, from: 'pending' as const, to: 'dispatched' as const } },
       },
@@ -217,14 +237,10 @@ export class OpsStore {
     return this.transition(opId, ['dispatched', 'acked'], 'completed', { result, completedAt: new Date() });
   }
 
-  async markFailed(opId: string, error: string, result?: OpResult): Promise<OpDoc | null> {
-    return this.transition(
-      opId,
-      ['pending', 'dispatched', 'acked', 'waiting_player'],
-      'failed',
-      { result: result ?? { ok: false, error }, completedAt: new Date() },
-      error,
-    );
+  /** The one failure write. Every path that fails an op goes through it. */
+  async markFailed(opId: string, error: string, result?: OpResult, opts: FailOpts = {}): Promise<OpDoc | null> {
+    const { from = FAILABLE_STATES, set, ...rest } = opts;
+    return this.transition(opId, from, 'failed', { ...set, result: result ?? { ok: false, error }, completedAt: new Date() }, error, rest);
   }
 
   /** Append a state-preserving audit note (e.g. a compound child skipped as unsupported). */
@@ -342,8 +358,7 @@ export class OpsStore {
   async requeueOrFail(op: OpDoc): Promise<OpDoc | null> {
     const where = { attempts: op.attempts, dispatchedAt: op.dispatchedAt };
     if (op.attempts >= op.maxAttempts) {
-      const error = `no ack after ${op.attempts} dispatch attempts`;
-      return this.transition(op._id, 'dispatched', 'failed', { result: { ok: false, error }, completedAt: new Date() }, error, { where });
+      return this.markFailed(op._id, `no ack after ${op.attempts} dispatch attempts`, undefined, { from: 'dispatched', where });
     }
     return this.transition(op._id, 'dispatched', 'pending', {}, `dispatch timeout (attempt ${op.attempts})`, { where });
   }
@@ -351,24 +366,26 @@ export class OpsStore {
   /**
    * The mod answered `deferred`: its server stops, so this dispatch did not run. That holds for an
    * acked op too: the mod defers an acked op only when its task never started and never will in
-   * that JVM. Back to pending without counting the attempt. `op` is the caller's read, `dispatched`
-   * or `acked`. The CAS holds only while the op is still that dispatch to `sessionId`. The
-   * {@link MAX_DEFERRALS}th deferral fails the op instead.
+   * that JVM. Back to pending without counting the attempt, and without the ack. `op` is the
+   * caller's read, `dispatched` or `acked`. The CAS holds only while the op is still a dispatch to
+   * the JVM with `bootNonce`, with the attempts and dispatch time of that read. The
+   * {@link MAX_DEFERRALS}th deferral fails the op with {@link TOO_MANY_DEFERRALS} instead.
    */
-  async markDeferred(op: OpDoc, sessionId: string, code: string): Promise<OpDoc | null> {
+  async markDeferred(op: OpDoc, bootNonce: string, code: string): Promise<OpDoc | null> {
     const deferrals = (op.deferrals ?? 0) + 1;
     const opts: TransitionOpts = {
-      where: { dispatchSessionId: sessionId, attempts: op.attempts, dispatchedAt: op.dispatchedAt },
+      where: { dispatchBootNonce: bootNonce, attempts: op.attempts, dispatchedAt: op.dispatchedAt },
       inc: { attempts: -1, deferrals: 1 },
       code,
     };
+    const unacked = { ackedAt: null };
     if (deferrals >= MAX_DEFERRALS) {
       const error = `${DEFERRED_NOTE} ${deferrals} times (${code}), gave up`;
-      const result = { ok: false, error, code: 'too_many_deferrals' };
-      return this.transition(op._id, op.state, 'failed', { result, completedAt: new Date() }, error, opts);
+      const result = { ok: false, error, code: TOO_MANY_DEFERRALS };
+      return this.markFailed(op._id, error, result, { ...opts, from: op.state, set: unacked });
     }
     const note = `${DEFERRED_NOTE} (${code}), not run, deferral ${deferrals}`;
-    return this.transition(op._id, op.state, 'pending', { ackedAt: null }, note, opts);
+    return this.transition(op._id, op.state, 'pending', unacked, note, opts);
   }
 
   /**
@@ -376,9 +393,8 @@ export class OpsStore {
    * CAS holds only while the op is still that ack, so a deferral that landed after the read wins.
    */
   async failStaleAcked(op: OpDoc): Promise<OpDoc | null> {
-    const error = `no result within ${op.execTimeoutMs}ms of ack`;
     const where = { attempts: op.attempts, ackedAt: op.ackedAt };
-    return this.transition(op._id, 'acked', 'failed', { result: { ok: false, error }, completedAt: new Date() }, error, { where });
+    return this.markFailed(op._id, `no result within ${op.execTimeoutMs}ms of ack`, undefined, { from: 'acked', where });
   }
 
   async markExpired(opId: string): Promise<OpDoc | null> {

@@ -7,7 +7,7 @@ import { getPolicy, FEATURE_BITS } from './policy-store.js';
 import { issueUploadGrant, profileUploadUrl, UPLOAD_GRACE_MS } from './profile-store.js';
 import { SERVER_STOPPING, type OpsStore } from './ops-store.js';
 import type { SyncSnapshotDoc } from './sync-snapshot-store.js';
-import type { OpDoc, OpResMsg, PresenceMsg } from './types.js';
+import type { OpDoc, OpResMsg, OpSession, PresenceMsg } from './types.js';
 
 export const OP_CHANNEL = 'biforesting:op';
 const CAP_OPS = FEATURE_BITS['ops']!;
@@ -15,13 +15,13 @@ const CAP_OPS = FEATURE_BITS['ops']!;
 /** How the dispatcher reaches a live link session (implemented by the link manager). */
 export interface OpSendPort {
   /**
-   * The id of the live, writable session of exactly this instanceKey that is not stopping, or
-   * null. A tag never matches.
+   * The live, writable session of exactly this instanceKey that takes ops, or null. A tag never
+   * matches. A session takes ops once its reg_ack granted them, and until it stops.
    */
-  sessionFor(instanceKey: string): string | null;
-  /** True + written when that session is still live, writable and not stopping. */
+  sessionFor(instanceKey: string): OpSession | null;
+  /** True + written when that session still takes ops. */
   sendDown(sessionId: string, channel: string, payload: Buffer): boolean;
-  /** instanceKeys of all live, identity-resolved sessions that are not stopping (for the sweep). */
+  /** instanceKeys of all live sessions that take ops (for the sweep). */
   liveInstanceKeys(): string[];
   /** The serverId the live session registered with. Profile upload URLs carry it. */
   linkServerIdFor?(instanceKey: string): string | null;
@@ -101,9 +101,10 @@ export class OpDispatcher {
   }
 
   /**
-   * Dispatch a single op: pick the session, CAS pending→dispatched with that session's id, then
-   * write to that session. With no usable session the op stays `pending` untouched. If the write
-   * fails (link died or began to stop since the pick) the op is eagerly rolled back to `pending`.
+   * Dispatch a single op: pick the session, CAS pending→dispatched with that session's id and
+   * bootNonce, then write to that session. With no usable session the op stays `pending`
+   * untouched. If the write fails (link died or began to stop since the pick) the op is eagerly
+   * rolled back to `pending`.
    * Left as `dispatched` it would ALSO miss the link-up redispatch (which only considers `pending`)
    * and sit until the sweep (observed live: op created while gtnh was down showed `dispatched`).
    */
@@ -121,9 +122,9 @@ export class OpDispatcher {
       if (failed) this.emitUpdated(failed);
       return false;
     }
-    const sessionId = this.port.sessionFor(op.instanceKey);
-    if (!sessionId) return false;
-    const dispatched = await this.store.markDispatched(op._id, sessionId);
+    const session = this.port.sessionFor(op.instanceKey);
+    if (!session) return false;
+    const dispatched = await this.store.markDispatched(op._id, session);
     if (!dispatched) return false; // raced by cancel/expiry/another dispatch
     this.emitUpdated(dispatched);
 
@@ -157,7 +158,7 @@ export class OpDispatcher {
       expiresAt: dispatched.expiresAt.getTime(),
     });
     const payload = blob ? encodeJsonPayloadWithBlob(wire, blob) : encodeJsonPayload(wire);
-    const ok = this.port.sendDown(sessionId, OP_CHANNEL, payload);
+    const ok = this.port.sendDown(session.sessionId, OP_CHANNEL, payload);
     if (!ok) {
       const requeued = await this.store.requeueUnwritable(dispatched._id);
       if (requeued) this.emitUpdated(requeued);
@@ -280,8 +281,8 @@ export class OpDispatcher {
 
   // ── Inbound (link manager routes op_res / presence here) ───────────────────
 
-  /** `sessionId` is the link session the answer came on. Only a `deferred` answer reads it. */
-  async onOpRes(instanceKey: string, msg: OpResMsg, sessionId?: string): Promise<void> {
+  /** `from` is the link session the answer came on. Only a `deferred` answer reads it. */
+  async onOpRes(instanceKey: string, msg: OpResMsg, from?: OpSession): Promise<void> {
     const op = await this.store.get(msg.opId);
     if (!op) {
       logger.warn({ opId: msg.opId, instanceKey }, 'biforesting-ops: op_res for unknown op');
@@ -316,35 +317,40 @@ export class OpDispatcher {
     } else if (msg.status === 'waiting_player') {
       updated = await this.store.markWaitingPlayer(msg.opId);
     } else if (msg.status === 'deferred') {
-      await this.onDeferred(op, msg, sessionId);
+      await this.onDeferred(op, msg, from);
       return;
     }
     if (updated) this.emitUpdated(updated);
   }
 
   /**
-   * `deferred` with code `server_stopping`: the server behind `sessionId` stops and did not run
-   * the op. That covers an op it acked whose task never started. The link manager already marked
-   * that session stopping, so the redispatch here skips it. It reaches a newer session of the
-   * instance at once, else the op waits as `pending` for the next link-up. Only the dispatch that
-   * went to this session goes back; any other deferral changes nothing.
+   * `deferred` with code `server_stopping`: the JVM behind `from` stops and did not run the op.
+   * That covers an op it acked whose task never started. The link manager already marked that
+   * session stopping, so the redispatch here skips it. It reaches a newer session of the instance
+   * at once, else the op waits as `pending` for the next link-up.
+   *
+   * Only a dispatch that went to the same JVM goes back: the bootNonce of `from` must be the one
+   * the dispatch stored. The answer may come on a later connection of that JVM. A JVM that
+   * defers an op never runs it, on any of its connections. Another JVM has another bootNonce, so
+   * its answer changes nothing.
    */
-  private async onDeferred(op: OpDoc, msg: OpResMsg, sessionId: string | undefined): Promise<void> {
+  private async onDeferred(op: OpDoc, msg: OpResMsg, from: OpSession | undefined): Promise<void> {
     const code = typeof msg.code === 'string' ? msg.code : null;
-    const ctx = { opId: op._id, instanceKey: op.instanceKey, type: op.type, sessionId: sessionId ?? null, code };
+    const bootNonce = from?.bootNonce ?? null;
+    const ctx = { opId: op._id, instanceKey: op.instanceKey, type: op.type, sessionId: from?.sessionId ?? null, bootNonce, code };
     if (code !== SERVER_STOPPING) {
       logger.warn({ ...ctx, state: op.state }, 'biforesting-ops: deferred answer with an unknown code, ignored');
       return;
     }
     const held = op.state === 'dispatched' || op.state === 'acked';
-    if (!held || !sessionId || op.dispatchSessionId !== sessionId) {
+    if (!held || bootNonce === null || op.dispatchBootNonce !== bootNonce) {
       logger.warn(
-        { ...ctx, state: op.state, dispatchSessionId: op.dispatchSessionId ?? null },
-        'biforesting-ops: deferred answer for an op this session does not hold, ignored',
+        { ...ctx, state: op.state, dispatchSessionId: op.dispatchSessionId ?? null, dispatchBootNonce: op.dispatchBootNonce ?? null },
+        'biforesting-ops: deferred answer for an op this JVM does not hold, ignored',
       );
       return;
     }
-    const updated = await this.store.markDeferred(op, sessionId, code);
+    const updated = await this.store.markDeferred(op, bootNonce, code);
     if (!updated) {
       logger.warn(ctx, 'biforesting-ops: deferred answer lost a race with another change of the op, ignored');
       return;

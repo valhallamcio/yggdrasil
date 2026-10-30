@@ -370,8 +370,23 @@ export interface OpDoc {
   completedAt: Date | null;
   /** The link session the latest dispatch was written to. Absent on older docs. */
   dispatchSessionId?: string | null;
+  /**
+   * The register bootNonce of that session: the JVM the latest dispatch went to. A `deferred`
+   * answer counts only when it comes from this JVM, on any of its connections. Absent on older docs.
+   */
+  dispatchBootNonce?: string | null;
   /** `deferred` answers so far. They do not count as attempts. Absent on older docs. */
   deferrals?: number;
+}
+
+/** A link session as the op layer sees it: where an op goes or where an answer came from. */
+export interface OpSession {
+  sessionId: string;
+  /**
+   * The bootNonce of the session's register. Each JVM has its own, and it sends the same one on
+   * every connection. Null when the session sent no register.
+   */
+  bootNonce: string | null;
 }
 
 /** Decoded `biforesting:op_res` (UP): ack that an op arrived, then its terminal result. */
