@@ -28,7 +28,7 @@ import {
 } from './sync-moves-store.js';
 import type { SyncGroupDoc, SyncGroupsStore } from './sync-groups-store.js';
 import type { SyncWorldDataDoc, SyncWorldDataStore } from './sync-worlddata-store.js';
-import type { OpsStore } from './ops-store.js';
+import { DEFERRED_NOTE, type OpsStore } from './ops-store.js';
 import type { GroupMember } from './server-resolver.js';
 import type { SyncAt, SyncDirectory, SyncLinkPort, SyncLiveHooks } from './sync-service.js';
 import type { OpDoc, OpTarget, PresencePlayer, SyncBlockedEntry, SyncStamp } from './types.js';
@@ -156,8 +156,8 @@ export type OpClass =
 
 /**
  * True when no dispatch of this op can have reached the mod. A dispatch whose link write failed
- * (the eager requeue right after it) never left Yggdrasil. A `waiting_player` answer means the
- * mod ran nothing.
+ * (the eager requeue right after it) never left Yggdrasil. A dispatch the mod answered `deferred`
+ * (its server stops) did not run. A `waiting_player` answer means the mod ran nothing.
  */
 export function provablyUnrun(op: Pick<OpDoc, 'attempts' | 'audit'>): boolean {
   if (op.attempts === 0) return true;
@@ -168,7 +168,8 @@ export function provablyUnrun(op: Pick<OpDoc, 'attempts' | 'audit'>): boolean {
     if (entry.to === 'dispatched') {
       const next = audit[i + 1];
       const neverSent = next?.to === 'pending' && next.note?.startsWith('link not writable') === true;
-      if (!neverSent) mayHaveRun = true;
+      const deferred = next?.from === 'dispatched' && next.note?.startsWith(DEFERRED_NOTE) === true;
+      if (!neverSent && !deferred) mayHaveRun = true;
     } else if (entry.to === 'waiting_player') {
       mayHaveRun = false;
     }

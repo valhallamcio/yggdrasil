@@ -327,6 +327,8 @@ export interface OpAuditEntry {
   from: OpState | null;
   to: OpState;
   note?: string;
+  /** The mod's code of the answer behind this entry (`server_stopping` on a deferral). */
+  code?: string;
 }
 
 export interface OpResult {
@@ -366,14 +368,21 @@ export interface OpDoc {
   dispatchedAt: Date | null;
   ackedAt: Date | null;
   completedAt: Date | null;
+  /** The link session the latest dispatch was written to. Absent on older docs. */
+  dispatchSessionId?: string | null;
+  /** `deferred` answers so far. They do not count as attempts. Absent on older docs. */
+  deferrals?: number;
 }
 
 /** Decoded `biforesting:op_res` (UP): ack that an op arrived, then its terminal result. */
 export interface OpResMsg {
   opId: string;
   phase: 'ack' | 'result';
-  /** result phase only. */
-  status?: 'completed' | 'failed' | 'waiting_player';
+  /**
+   * result phase only. `deferred`: the server stops, so the op did not run and got no ack.
+   * Yggdrasil sends it again to the next link session of that instance.
+   */
+  status?: 'completed' | 'failed' | 'waiting_player' | 'deferred';
   result?: unknown;
   error?: string;
   /** Machine-readable failure code (e.g. `unsupported_op`) — compound skip logic keys on it. */
@@ -418,6 +427,8 @@ export interface LinkSessionSnapshot {
   register: RegisterInfo | null;
   /** Bits granted in the last reg_ack (policy ∩ capabilities). */
   grantedFeatures: number;
+  /** True after the session answered an op `deferred`: its server stops, and ops skip it. */
+  stopping: boolean;
   /** `biforesting:live` frame counts for this session. */
   live: { up: number; down: number; dropped: number };
 }

@@ -121,6 +121,7 @@ before(async () => {
       sent.push({ instanceKey, ...decodeOp(payload) });
       return true;
     },
+    sessionFor: (instanceKey) => (liveKeys.has(instanceKey) ? instanceKey : null),
     liveInstanceKeys: () => [...liveKeys],
   });
   groups = new SyncGroupsStore(() => db, now);

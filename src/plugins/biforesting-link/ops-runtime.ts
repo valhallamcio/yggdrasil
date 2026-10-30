@@ -15,7 +15,8 @@ import type { OpDoc } from './types.js';
 export const opsStore = new OpsStore(() => getDb());
 
 export const opDispatcher = new OpDispatcher(opsStore, {
-  sendDown: (instanceKey, channel, payload) => biforestingLinkManager.sendDown(instanceKey, channel, payload),
+  sessionFor: (instanceKey): string | null => biforestingLinkManager.opSessionFor(instanceKey),
+  sendDown: (sessionId, channel, payload): boolean => biforestingLinkManager.sendOpDown(sessionId, channel, payload),
   liveInstanceKeys: () => biforestingLinkManager.liveInstanceKeys(),
   linkServerIdFor: (instanceKey): string | null => biforestingLinkManager.getSessionByServer(instanceKey)?.identity?.linkServerId ?? null,
 });

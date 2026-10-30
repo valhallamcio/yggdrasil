@@ -14,9 +14,14 @@ const CAP_OPS = FEATURE_BITS['ops']!;
 
 /** How the dispatcher reaches a live link session (implemented by the link manager). */
 export interface OpSendPort {
-  /** True + written when a live writable session exists for the instanceKey. */
-  sendDown(instanceKey: string, channel: string, payload: Buffer): boolean;
-  /** instanceKeys of all live, identity-resolved sessions (for the sweep). */
+  /**
+   * The id of the live, writable session of exactly this instanceKey that is not stopping, or
+   * null. A tag never matches.
+   */
+  sessionFor(instanceKey: string): string | null;
+  /** True + written when that session is still live, writable and not stopping. */
+  sendDown(sessionId: string, channel: string, payload: Buffer): boolean;
+  /** instanceKeys of all live, identity-resolved sessions that are not stopping (for the sweep). */
   liveInstanceKeys(): string[];
   /** The serverId the live session registered with. Profile upload URLs carry it. */
   linkServerIdFor?(instanceKey: string): string | null;
@@ -96,10 +101,11 @@ export class OpDispatcher {
   }
 
   /**
-   * Dispatch a single op: CAS pending→dispatched first, then write. If the write fails (link died
-   * between the check and the write) the op is eagerly rolled back to `pending` — left as
-   * `dispatched` it would ALSO miss the link-up redispatch (which only considers `pending`) and
-   * sit until the sweep (observed live: op created while gtnh was down showed `dispatched`).
+   * Dispatch a single op: pick the session, CAS pending→dispatched with that session's id, then
+   * write to that session. With no usable session the op stays `pending` untouched. If the write
+   * fails (link died or began to stop since the pick) the op is eagerly rolled back to `pending`.
+   * Left as `dispatched` it would ALSO miss the link-up redispatch (which only considers `pending`)
+   * and sit until the sweep (observed live: op created while gtnh was down showed `dispatched`).
    */
   private async dispatchOne(op: OpDoc): Promise<boolean> {
     // Gate BEFORE the pending→dispatched CAS: with the ops bit off the op must stay `pending`
@@ -115,7 +121,9 @@ export class OpDispatcher {
       if (failed) this.emitUpdated(failed);
       return false;
     }
-    const dispatched = await this.store.markDispatched(op._id);
+    const sessionId = this.port.sessionFor(op.instanceKey);
+    if (!sessionId) return false;
+    const dispatched = await this.store.markDispatched(op._id, sessionId);
     if (!dispatched) return false; // raced by cancel/expiry/another dispatch
     this.emitUpdated(dispatched);
 
@@ -149,7 +157,7 @@ export class OpDispatcher {
       expiresAt: dispatched.expiresAt.getTime(),
     });
     const payload = blob ? encodeJsonPayloadWithBlob(wire, blob) : encodeJsonPayload(wire);
-    const ok = this.port.sendDown(dispatched.instanceKey, OP_CHANNEL, payload);
+    const ok = this.port.sendDown(sessionId, OP_CHANNEL, payload);
     if (!ok) {
       const requeued = await this.store.requeueUnwritable(dispatched._id);
       if (requeued) this.emitUpdated(requeued);
@@ -272,7 +280,8 @@ export class OpDispatcher {
 
   // ── Inbound (link manager routes op_res / presence here) ───────────────────
 
-  async onOpRes(instanceKey: string, msg: OpResMsg): Promise<void> {
+  /** `sessionId` is the link session the answer came on. Only a `deferred` answer reads it. */
+  async onOpRes(instanceKey: string, msg: OpResMsg, sessionId?: string): Promise<void> {
     const op = await this.store.get(msg.opId);
     if (!op) {
       logger.warn({ opId: msg.opId, instanceKey }, 'biforesting-ops: op_res for unknown op');
@@ -306,8 +315,41 @@ export class OpDispatcher {
       });
     } else if (msg.status === 'waiting_player') {
       updated = await this.store.markWaitingPlayer(msg.opId);
+    } else if (msg.status === 'deferred') {
+      await this.onDeferred(op, msg, sessionId);
+      return;
     }
     if (updated) this.emitUpdated(updated);
+  }
+
+  /**
+   * `deferred`: the server behind `sessionId` stops and did not run the op. The link manager
+   * already marked that session stopping, so the redispatch here skips it. It reaches a newer
+   * session of the instance at once, else the op waits as `pending` for the next link-up. Only the
+   * dispatch that went to this session goes back; any other deferral changes nothing.
+   */
+  private async onDeferred(op: OpDoc, msg: OpResMsg, sessionId: string | undefined): Promise<void> {
+    const code = msg.code ?? 'deferred';
+    const ctx = { opId: op._id, instanceKey: op.instanceKey, type: op.type, sessionId: sessionId ?? null, code };
+    if (op.state !== 'dispatched' || !sessionId || op.dispatchSessionId !== sessionId) {
+      logger.warn(
+        { ...ctx, state: op.state, dispatchSessionId: op.dispatchSessionId ?? null },
+        'biforesting-ops: deferred answer for an op not dispatched to this session, ignored',
+      );
+      return;
+    }
+    const updated = await this.store.markDeferred(op, sessionId, code);
+    if (!updated) {
+      logger.warn(ctx, 'biforesting-ops: deferred answer lost a race with another change of the op, ignored');
+      return;
+    }
+    this.emitUpdated(updated);
+    if (updated.state === 'failed') {
+      logger.warn({ ...ctx, deferrals: updated.deferrals }, 'biforesting-ops: op deferred too often, failed');
+      return;
+    }
+    logger.info({ ...ctx, deferrals: updated.deferrals }, 'biforesting-ops: op deferred by a stopping server, pending for its next session');
+    await this.dispatchOne(updated);
   }
 
   async onPresence(instanceKey: string, msg: PresenceMsg): Promise<void> {

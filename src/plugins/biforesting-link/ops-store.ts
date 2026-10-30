@@ -1,4 +1,4 @@
-import type { Collection, Db } from 'mongodb';
+import type { Collection, Db, Filter } from 'mongodb';
 import { logger } from '../../core/logger/index.js';
 import { ulid } from './ulid.js';
 import type { OpDoc, OpFlags, OpResult, OpState, OpTarget } from './types.js';
@@ -12,7 +12,8 @@ import type { OpDoc, OpFlags, OpResult, OpState, OpTarget } from './types.js';
  *   pending → dispatched → acked → completed | failed
  *      ↑          │                    (op_res result)
  *      │          ├→ waiting_player  (target offline, queued for next login)
- *      │          └→ pending         (dispatch timeout, attempts < max)
+ *      │          ├→ pending         (dispatch timeout, attempts < max)
+ *      │          └→ pending         (`deferred`: the server stops; no attempt counted)
  *      └── waiting_player (presence join re-queues)
  *   pending | waiting_player | dispatched → cancelled (REST, pre-ack only) | expired (sweep)
  *
@@ -47,6 +48,24 @@ export const OP_DEFAULTS = {
 
 /** States that may still reach the backend (cancellable, expirable). */
 export const PRE_ACK_STATES: OpState[] = ['pending', 'dispatched', 'waiting_player'];
+
+/**
+ * The deferral that fails an op with code `too_many_deferrals`. A stopping session gets no op
+ * again, so only a run of new JVMs that each stop at once (a crash loop) gets this far.
+ */
+export const MAX_DEFERRALS = 20;
+
+/** Audit note prefix of a dispatch the mod answered `deferred`. The sync runner keys on it. */
+export const DEFERRED_NOTE = 'deferred by the server';
+
+/** Extra parts of one guarded transition. */
+interface TransitionOpts {
+  /** CAS conditions on top of `_id` and `state`. */
+  where?: Filter<OpDoc>;
+  inc?: Partial<Record<'attempts' | 'deferrals', number>>;
+  /** The mod's answer code, kept on the audit entry. */
+  code?: string;
+}
 
 export class OpsStore {
   private indexEnsured = false;
@@ -145,6 +164,7 @@ export class OpsStore {
     to: OpState,
     extra: Partial<OpDoc>,
     note?: string,
+    opts: TransitionOpts = {},
   ): Promise<OpDoc | null> {
     const fromStates = Array.isArray(from) ? from : [from];
     // One CAS per candidate source state so the audit entry always carries the REAL `from`
@@ -152,10 +172,13 @@ export class OpsStore {
     for (const fromState of fromStates) {
       const now = new Date();
       const res = await this.col().findOneAndUpdate(
-        { _id: opId, state: fromState },
+        { ...opts.where, _id: opId, state: fromState },
         {
           $set: { ...extra, state: to, updatedAt: now },
-          $push: { audit: { at: now, from: fromState, to, ...(note ? { note } : {}) } },
+          $push: {
+            audit: { at: now, from: fromState, to, ...(note ? { note } : {}), ...(opts.code ? { code: opts.code } : {}) },
+          },
+          ...(opts.inc ? { $inc: opts.inc } : {}),
         },
         { returnDocument: 'after' },
       );
@@ -164,13 +187,16 @@ export class OpsStore {
     return null;
   }
 
-  /** pending → dispatched (attempts+1). Null when the op is no longer pending (racing sweep/cancel). */
-  async markDispatched(opId: string): Promise<OpDoc | null> {
+  /**
+   * pending → dispatched (attempts+1), written to link session `sessionId`. Null when the op is
+   * no longer pending (racing sweep/cancel).
+   */
+  async markDispatched(opId: string, sessionId: string | null = null): Promise<OpDoc | null> {
     const now = new Date();
     const res = await this.col().findOneAndUpdate(
       { _id: opId, state: 'pending' },
       {
-        $set: { state: 'dispatched', dispatchedAt: now, updatedAt: now },
+        $set: { state: 'dispatched', dispatchedAt: now, dispatchSessionId: sessionId, updatedAt: now },
         $inc: { attempts: 1 },
         $push: { audit: { at: now, from: 'pending' as const, to: 'dispatched' as const } },
       },
@@ -305,12 +331,38 @@ export class OpsStore {
     return this.transition(opId, 'dispatched', 'pending', {}, 'link not writable at dispatch — eager requeue');
   }
 
-  /** Requeue a timed-out dispatch, or fail it once attempts are exhausted. */
+  /**
+   * Requeue a timed-out dispatch, or fail it once attempts are exhausted. `op` is the sweep's
+   * read. The CAS holds only while the op is still that dispatch, so a deferral or a new
+   * dispatch that landed after the read wins.
+   */
   async requeueOrFail(op: OpDoc): Promise<OpDoc | null> {
+    const where = { attempts: op.attempts, dispatchedAt: op.dispatchedAt };
     if (op.attempts >= op.maxAttempts) {
-      return this.markFailed(op._id, `no ack after ${op.attempts} dispatch attempts`);
+      const error = `no ack after ${op.attempts} dispatch attempts`;
+      return this.transition(op._id, 'dispatched', 'failed', { result: { ok: false, error }, completedAt: new Date() }, error, { where });
     }
-    return this.transition(op._id, 'dispatched', 'pending', {}, `dispatch timeout (attempt ${op.attempts})`);
+    return this.transition(op._id, 'dispatched', 'pending', {}, `dispatch timeout (attempt ${op.attempts})`, { where });
+  }
+
+  /**
+   * The mod answered `deferred`: its server stops, so this dispatch did not run. Back to pending
+   * without counting the attempt. `op` is the caller's read. The CAS holds only while the op is
+   * still that dispatch to `sessionId`. The {@link MAX_DEFERRALS}th deferral fails the op instead.
+   */
+  async markDeferred(op: OpDoc, sessionId: string, code: string): Promise<OpDoc | null> {
+    const deferrals = (op.deferrals ?? 0) + 1;
+    const opts: TransitionOpts = {
+      where: { dispatchSessionId: sessionId, attempts: op.attempts, dispatchedAt: op.dispatchedAt },
+      inc: { attempts: -1, deferrals: 1 },
+      code,
+    };
+    if (deferrals >= MAX_DEFERRALS) {
+      const error = `${DEFERRED_NOTE} ${deferrals} times (${code}), gave up`;
+      const result = { ok: false, error, code: 'too_many_deferrals' };
+      return this.transition(op._id, 'dispatched', 'failed', { result, completedAt: new Date() }, error, opts);
+    }
+    return this.transition(op._id, 'dispatched', 'pending', {}, `${DEFERRED_NOTE} (${code}), not run, deferral ${deferrals}`, opts);
   }
 
   async markExpired(opId: string): Promise<OpDoc | null> {

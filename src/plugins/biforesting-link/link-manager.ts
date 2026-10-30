@@ -50,7 +50,8 @@ const SYNCSNAP = 'biforesting:syncsnap';
  * import cycle with the ops runtime.
  */
 export interface OpSink {
-  onOpRes(instanceKey: string, msg: OpResMsg): Promise<void>;
+  /** `sessionId` is the link session the answer came on. */
+  onOpRes(instanceKey: string, msg: OpResMsg, sessionId?: string): Promise<void>;
   onPresence(instanceKey: string, msg: PresenceMsg): Promise<void>;
   onLinkUp(instanceKey: string): Promise<void>;
 }
@@ -100,6 +101,11 @@ interface Session {
   register: RegisterInfo | null;
   /** Bits granted in the last reg_ack (policy ∩ capabilities). 0 until the first reg_ack. */
   granted: number;
+  /**
+   * Set when the server answered an op `deferred`: it stops, so ops skip this session. It ends
+   * with the session. The next JVM links as a new session.
+   */
+  stopping: boolean;
   liveBucket: TokenBucket;
   liveUp: number;
   liveDown: number;
@@ -140,13 +146,48 @@ class BiforestingLinkManager {
     this.liveUpSink = sink;
   }
 
-  /** instanceKeys of all live, identity-resolved sessions (op dispatch sweep). */
+  /** instanceKeys of all live, identity-resolved sessions that take ops (op dispatch sweep). */
   liveInstanceKeys(): string[] {
     const keys: string[] = [];
     for (const s of this.sessions.values()) {
-      if (s.identity?.resolved && s.transport.writable()) keys.push(s.identity.instanceKey);
+      if (this.takesOps(s)) keys.push(s.identity.instanceKey);
     }
     return keys;
+  }
+
+  /** The id of the session that takes ops for exactly this instanceKey, or null. A tag never matches. */
+  opSessionFor(instanceKey: string): string | null {
+    for (const s of this.sessions.values()) {
+      if (this.takesOps(s) && s.identity.instanceKey === instanceKey) return s.sessionId;
+    }
+    return null;
+  }
+
+  /** Write an op DOWN one session. False when it closed or began to stop since the pick. */
+  sendOpDown(sessionId: string, channel: string, payload: Buffer): boolean {
+    const s = this.sessions.get(sessionId);
+    if (!s || !this.takesOps(s)) return false;
+    return this.sendDownToSession(s, channel, payload);
+  }
+
+  private takesOps(s: Session): s is Session & { identity: LinkIdentity } {
+    return !!s.identity?.resolved && !s.stopping && s.transport.writable();
+  }
+
+  /** The server answered `deferred`, so it stops. Ops skip the session from now on. */
+  private markStopping(s: Session, msg: OpResMsg): void {
+    if (s.stopping) return;
+    s.stopping = true;
+    logger.info(
+      {
+        sessionId: s.sessionId,
+        instanceKey: s.identity?.instanceKey ?? null,
+        bootNonce: s.register?.bootNonce ?? null,
+        opId: msg.opId,
+        code: msg.code ?? null,
+      },
+      'biforesting-link: session answered deferred, its server stops; ops wait for the next session',
+    );
   }
 
   // ── Session lifecycle ──────────────────────────────────────────────────────
@@ -169,6 +210,7 @@ class BiforestingLinkManager {
       lastDataVersion: null,
       register: null,
       granted: 0,
+      stopping: false,
       liveBucket: new TokenBucket(LIVE_UP_RATE_PER_SEC, LIVE_UP_BURST, Date.now()),
       liveUp: 0,
       liveDown: 0,
@@ -275,7 +317,9 @@ class BiforestingLinkManager {
         break;
       case OP_RES:
         if (s.identity?.resolved && this.opSink) {
-          await this.opSink.onOpRes(s.identity.instanceKey, decodeOpRes(payload));
+          const msg = decodeOpRes(payload);
+          if (msg.phase === 'result' && msg.status === 'deferred') this.markStopping(s, msg);
+          await this.opSink.onOpRes(s.identity.instanceKey, msg, s.sessionId);
         }
         break;
       case PRESENCE:
@@ -772,6 +816,7 @@ class BiforestingLinkManager {
       lastDataVersion: s.lastDataVersion,
       register: s.register,
       grantedFeatures: s.granted,
+      stopping: s.stopping,
       live: { up: s.liveUp, down: s.liveDown, dropped: s.liveDropped },
     };
   }
